@@ -22,10 +22,10 @@ func main() {
 	}
 
 	command := os.Args[1]
+	inst := installer.GetInstaller(runServer)
 
 	switch command {
 	case "install":
-		inst := installer.GetInstaller()
 		if inst == nil {
 			log.Fatal("SO no soportado para instalación automática")
 		}
@@ -35,17 +35,44 @@ func main() {
 		fmt.Println("Instalación completada.")
 
 	case "start":
-		inst := installer.GetInstaller()
-		if inst != nil {
-			inst.Start()
+		if inst == nil {
+			log.Fatal("SO no soportado para modo servicio")
 		}
-		runServer("http") // Start running foreground process or wait for daemon
+		// If running interactively, inst.Run() might block or start the service logic
+		// But usually `service.Start` is what we use to start the background service
+		// Wait, if we are in start subcommand, we might be starting the service, or running it.
+		// If the user runs `memory-server start` they mean "inicia el servicio en segundo plano".
+		if err := inst.Start(); err != nil {
+			// If it fails to start (e.g., not installed), maybe just run it
+			if runErr := inst.Run(runServer); runErr != nil {
+				log.Fatalf("Error iniciando: %v, y falló la ejecución directa: %v", err, runErr)
+			}
+		} else {
+			fmt.Println("Servicio iniciado en segundo plano.")
+		}
+
+	case "run":
+		// Called by the service manager
+		if inst != nil {
+			if err := inst.Run(runServer); err != nil {
+				log.Fatalf("Error en Run: %v", err)
+			}
+		} else {
+			runServer("http")
+		}
+
+	case "stop":
+		if inst != nil {
+			if err := inst.Stop(); err != nil {
+				log.Fatalf("Error deteniendo el servicio: %v", err)
+			}
+			fmt.Println("Servicio detenido.")
+		}
 
 	case "stdio":
 		runServer("stdio")
 
 	case "status":
-		inst := installer.GetInstaller()
 		if inst != nil {
 			status, _ := inst.Status()
 			fmt.Printf("Status: %s\n", status)
@@ -78,10 +105,12 @@ func printUsage() {
 	fmt.Println("Uso: memory-server [comando]")
 	fmt.Println("Comandos disponibles:")
 	fmt.Println("  install   - Instala el servicio en segundo plano (systemd/launchd)")
-	fmt.Println("  start     - Inicia el servidor (y el servicio si corresponde)")
+	fmt.Println("  start     - Inicia el servicio en segundo plano")
+	fmt.Println("  stop      - Detiene el servicio en segundo plano")
 	fmt.Println("  stdio     - Inicia el servidor en modo MCP stdio")
 	fmt.Println("  status    - Muestra el estado del servicio")
 	fmt.Println("  health    - Comprueba las dependencias (doctor)")
+	fmt.Println("  doctor    - Alias para health")
 	fmt.Println("  export    - Exporta la memoria a un archivo")
 	fmt.Println("  import    - Importa la memoria desde un archivo")
 }

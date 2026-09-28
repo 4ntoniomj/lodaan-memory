@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/google/uuid v1.6.0
+	github.com/kardianos/service v1.3.0
 	github.com/lib/pq v1.12.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pgvector/pgvector-go v0.4.1
