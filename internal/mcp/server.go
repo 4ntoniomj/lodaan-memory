@@ -26,12 +26,15 @@ func NewServer(svc *memory.Service) *Server {
 }
 
 type MemoryStoreInput struct {
-	Memory string `json:"memory" jsonschema:"description=Información o recuerdo en lenguaje natural para guardar,required"`
+	// Información o recuerdo en lenguaje natural para guardar, requerido
+	Memory string `json:"memory" jsonschema:"required"`
 }
 
 type MemorySearchInput struct {
-	Query string `json:"query" jsonschema:"description=Consulta en lenguaje natural para buscar recuerdos,required"`
-	Limit int    `json:"limit,omitempty" jsonschema:"description=Número máximo de recuerdos a recuperar"`
+	// Consulta en lenguaje natural para buscar recuerdos, requerido
+	Query string `json:"query" jsonschema:"required"`
+	// Número máximo de recuerdos a recuperar
+	Limit int    `json:"limit,omitempty"`
 }
 
 func (s *Server) SetupTools() {
