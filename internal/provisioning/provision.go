@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -65,13 +66,16 @@ func EnsureDependencies() error {
 	if pgCtlPath == "" {
 		pgCtlPath = "pg_ctl"
 	}
-	pgCtl := exec.Command(pgCtlPath, "-D", dbDir, "-l", filepath.Join(lodanDir, "postgres.log"), "start")
-	if err := pgCtl.Run(); err != nil {
-		log.Printf("pg_ctl start warning (might be already running): %v", err)
-	}
 	
-	// Wait a moment for postgres to be ready
-	time.Sleep(2 * time.Second)
+	if err := exec.Command(pgCtlPath, "-D", dbDir, "status").Run(); err != nil {
+		pgCtl := exec.Command(pgCtlPath, "-D", dbDir, "-l", filepath.Join(lodanDir, "postgres.log"), "start")
+		if err := pgCtl.Run(); err != nil {
+			log.Printf("pg_ctl start warning (might be already running): %v", err)
+		}
+		
+		// Wait a moment for postgres to be ready
+		time.Sleep(2 * time.Second)
+	}
 	
 	// Create database if not exists
 	createdbPath, _ := findPostgresBinary("createdb")
@@ -94,12 +98,16 @@ func EnsureDependencies() error {
 	}
 
 	// 5. Pull model
-	log.Println("Pulling ollama model embeddinggemma:300m-qat-q4_0...")
-	pullCmd := exec.Command("ollama", "pull", "embeddinggemma:300m-qat-q4_0")
-	pullCmd.Stdout = os.Stdout
-	pullCmd.Stderr = os.Stderr
-	if err := pullCmd.Run(); err != nil {
-		return fmt.Errorf("failed to pull model: %w", err)
+	log.Println("Checking ollama model embeddinggemma:300m-qat-q4_0...")
+	out, _ := exec.Command("ollama", "list").Output()
+	if !strings.Contains(string(out), "embeddinggemma:300m-qat-q4_0") {
+		log.Println("Pulling ollama model embeddinggemma:300m-qat-q4_0...")
+		pullCmd := exec.Command("ollama", "pull", "embeddinggemma:300m-qat-q4_0")
+		pullCmd.Stdout = os.Stdout
+		pullCmd.Stderr = os.Stderr
+		if err := pullCmd.Run(); err != nil {
+			return fmt.Errorf("failed to pull model: %w", err)
+		}
 	}
 
 	return nil
@@ -107,10 +115,12 @@ func EnsureDependencies() error {
 
 func installDependencies() error {
 	// Check Postgres
-	_, errPg := findPostgresBinary("initdb")
+	_, errPgInit := findPostgresBinary("initdb")
+	_, errPgCtl := findPostgresBinary("pg_ctl")
+	_, errPg := findPostgresBinary("postgres")
 	_, errOllama := exec.LookPath("ollama")
 	
-	if errPg == nil && errOllama == nil {
+	if errPgInit == nil && errPgCtl == nil && errPg == nil && errOllama == nil {
 		return nil
 	}
 
@@ -125,7 +135,7 @@ func installDependencies() error {
 		hasApt = true
 	}
 
-	if errPg != nil {
+	if errPgInit != nil || errPgCtl != nil || errPg != nil {
 		log.Println("Installing PostgreSQL...")
 		if hasBrew {
 			exec.Command("brew", "install", "postgresql@18", "pgvector").Run()
