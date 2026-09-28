@@ -45,9 +45,9 @@ func EnsureDependencies() error {
 	}
 
 	// 2. Initialize PostgreSQL if needed
-	initdbPath, _ := findPostgresBinary("initdb")
-	if initdbPath == "" {
-		initdbPath = "initdb"
+	initdbPath, err := findPostgresBinary("initdb")
+	if err != nil {
+		return fmt.Errorf("initdb not found after installation: %w", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(dbDir, "PG_VERSION")); os.IsNotExist(err) {
@@ -62,9 +62,9 @@ func EnsureDependencies() error {
 
 	// 3. Start PostgreSQL
 	log.Println("Starting PostgreSQL...")
-	pgCtlPath, _ := findPostgresBinary("pg_ctl")
-	if pgCtlPath == "" {
-		pgCtlPath = "pg_ctl"
+	pgCtlPath, err := findPostgresBinary("pg_ctl")
+	if err != nil {
+		return fmt.Errorf("pg_ctl not found after installation: %w", err)
 	}
 	
 	if err := exec.Command(pgCtlPath, "-D", dbDir, "status").Run(); err != nil {
@@ -78,9 +78,9 @@ func EnsureDependencies() error {
 	}
 	
 	// Create database if not exists
-	createdbPath, _ := findPostgresBinary("createdb")
-	if createdbPath == "" {
-		createdbPath = "createdb"
+	createdbPath, err := findPostgresBinary("createdb")
+	if err != nil {
+		return fmt.Errorf("createdb not found after installation: %w", err)
 	}
 	exec.Command(createdbPath, "-h", "localhost", "lodan").Run()
 
