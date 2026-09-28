@@ -3,7 +3,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Tabla principal de recuerdos
 CREATE TABLE IF NOT EXISTS memory_items (
-    id UUID PRIMARY KEY DEFAULT uuidv7(),
+    id UUID PRIMARY KEY,
     content TEXT NOT NULL,
     memory_type TEXT NOT NULL,
     active BOOLEAN DEFAULT true,
@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS memory_items_metadata_idx ON memory_items USING GIN (
 
 -- Tabla de relaciones
 CREATE TABLE IF NOT EXISTS memory_links (
-    id UUID PRIMARY KEY DEFAULT uuidv7(),
+    id UUID PRIMARY KEY,
     source_id UUID NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
     target_id UUID NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
     relation_type TEXT NOT NULL,

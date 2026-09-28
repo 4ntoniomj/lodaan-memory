@@ -43,7 +43,7 @@ func (s *Server) SetupTools() {
 			return nil, nil, fmt.Errorf("missing 'memory' argument")
 		}
 
-		item, err := s.svc.StoreMemory(ctx, input.Memory, "fact", "assistant")
+		item, err := s.svc.StoreMemory(ctx, input.Memory, "fact", "assistant", "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
