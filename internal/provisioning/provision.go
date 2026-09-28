@@ -52,7 +52,7 @@ func EnsureDependencies() error {
 
 	if _, err := os.Stat(filepath.Join(dbDir, "PG_VERSION")); os.IsNotExist(err) {
 		log.Println("Initializing PostgreSQL database cluster at", dbDir)
-		cmd := exec.Command(initdbPath, "-D", dbDir)
+		cmd := exec.Command(initdbPath, "-D", dbDir, "--auth=trust", "--auth-local=trust", "--auth-host=trust")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
