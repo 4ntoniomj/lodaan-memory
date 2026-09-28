@@ -82,7 +82,13 @@ func EnsureDependencies() error {
 	if err != nil {
 		return fmt.Errorf("createdb not found after installation: %w", err)
 	}
-	exec.Command(createdbPath, "-h", "localhost", "lodan").Run()
+	createCmd := exec.Command(createdbPath, "-h", "localhost", "lodan")
+	createCmd.Stdout = os.Stdout
+	createCmd.Stderr = os.Stderr
+	if err := createCmd.Run(); err != nil {
+		// Ignore error here as DB might exist, but log it
+		log.Printf("createdb info: %v", err)
+	}
 
 	// 4. Start Ollama if not running
 	log.Println("Starting Ollama...")
@@ -138,10 +144,27 @@ func installDependencies() error {
 	if errPgInit != nil || errPgCtl != nil || errPg != nil {
 		log.Println("Installing PostgreSQL...")
 		if hasBrew {
-			exec.Command("brew", "install", "postgresql@18", "pgvector").Run()
+			cmd := exec.Command("brew", "install", "postgresql@18", "pgvector")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("fallo al instalar dependencias: %w", err)
+			}
 		} else if hasApt {
-			exec.Command("sudo", "apt-get", "update").Run()
-			exec.Command("sudo", "apt-get", "install", "-y", "postgresql-16", "postgresql-16-pgvector").Run()
+			cmdUp := exec.Command("sudo", "apt-get", "update")
+			cmdUp.Stdout = os.Stdout
+			cmdUp.Stderr = os.Stderr
+			if err := cmdUp.Run(); err != nil {
+				return fmt.Errorf("fallo al instalar dependencias: %w", err)
+			}
+			
+			log.Println("Note: Attempting to install postgresql, postgresql-contrib and postgresql-all for pgvector")
+			cmdInst := exec.Command("sudo", "apt-get", "install", "-y", "postgresql", "postgresql-contrib", "postgresql-all")
+			cmdInst.Stdout = os.Stdout
+			cmdInst.Stderr = os.Stderr
+			if err := cmdInst.Run(); err != nil {
+				return fmt.Errorf("fallo al instalar dependencias: %w", err)
+			}
 		} else {
 			return fmt.Errorf("no supported package manager found to install PostgreSQL")
 		}
