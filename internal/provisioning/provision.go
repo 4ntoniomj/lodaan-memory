@@ -134,8 +134,14 @@ func installDependencies() error {
 	_, errPgCtl := findPostgresBinary("pg_ctl")
 	_, errPg := findPostgresBinary("postgres")
 	_, errOllama := exec.LookPath("ollama")
-	
-	if errPgInit == nil && errPgCtl == nil && errPg == nil && errOllama == nil {
+
+	// Check pgvector
+	hasPgVector := false
+	if matches, _ := filepath.Glob("/usr/share/postgresql/*/extension/vector.control"); len(matches) > 0 {
+		hasPgVector = true
+	}
+
+	if errPgInit == nil && errPgCtl == nil && errPg == nil && errOllama == nil && hasPgVector {
 		return nil
 	}
 
@@ -150,8 +156,8 @@ func installDependencies() error {
 		hasApt = true
 	}
 
-	if errPgInit != nil || errPgCtl != nil || errPg != nil {
-		log.Println("Installing PostgreSQL...")
+	if errPgInit != nil || errPgCtl != nil || errPg != nil || !hasPgVector {
+		log.Println("Installing PostgreSQL and/or pgvector...")
 		if hasBrew {
 			cmd := exec.Command("brew", "install", "postgresql@18", "pgvector")
 			cmd.Stdout = os.Stdout
@@ -164,11 +170,11 @@ func installDependencies() error {
 			cmdUp.Stdout = os.Stdout
 			cmdUp.Stderr = os.Stderr
 			if err := cmdUp.Run(); err != nil {
-				return fmt.Errorf("fallo al instalar dependencias: %w", err)
+				return fmt.Errorf("fallo al actualizar apt: %w", err)
 			}
 			
-			log.Println("Note: Attempting to install postgresql, postgresql-contrib and postgresql-all for pgvector")
-			cmdInst := exec.Command("sudo", "apt-get", "install", "-y", "postgresql", "postgresql-contrib", "postgresql-all")
+			log.Println("Note: Attempting to install postgresql, postgresql-contrib and pgvector")
+			cmdInst := exec.Command("sudo", "apt-get", "install", "-y", "postgresql", "postgresql-contrib", "postgresql-18-pgvector")
 			cmdInst.Stdout = os.Stdout
 			cmdInst.Stderr = os.Stderr
 			if err := cmdInst.Run(); err != nil {
