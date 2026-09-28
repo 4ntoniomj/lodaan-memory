@@ -9,6 +9,22 @@ import (
 	"time"
 )
 
+func findPostgresBinary(name string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err == nil {
+		return path, nil
+	}
+	
+	// Fallback for Debian/Ubuntu
+	matches, _ := filepath.Glob(fmt.Sprintf("/usr/lib/postgresql/*/bin/%s", name))
+	if len(matches) > 0 {
+		// Take the highest version by taking the last match (Glob returns sorted)
+		return matches[len(matches)-1], nil
+	}
+	
+	return "", fmt.Errorf("%s not found", name)
+}
+
 func EnsureDependencies() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -28,9 +44,14 @@ func EnsureDependencies() error {
 	}
 
 	// 2. Initialize PostgreSQL if needed
+	initdbPath, _ := findPostgresBinary("initdb")
+	if initdbPath == "" {
+		initdbPath = "initdb"
+	}
+
 	if _, err := os.Stat(filepath.Join(dbDir, "PG_VERSION")); os.IsNotExist(err) {
 		log.Println("Initializing PostgreSQL database cluster at", dbDir)
-		cmd := exec.Command("initdb", "-D", dbDir)
+		cmd := exec.Command(initdbPath, "-D", dbDir)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -40,7 +61,11 @@ func EnsureDependencies() error {
 
 	// 3. Start PostgreSQL
 	log.Println("Starting PostgreSQL...")
-	pgCtl := exec.Command("pg_ctl", "-D", dbDir, "-l", filepath.Join(lodanDir, "postgres.log"), "start")
+	pgCtlPath, _ := findPostgresBinary("pg_ctl")
+	if pgCtlPath == "" {
+		pgCtlPath = "pg_ctl"
+	}
+	pgCtl := exec.Command(pgCtlPath, "-D", dbDir, "-l", filepath.Join(lodanDir, "postgres.log"), "start")
 	if err := pgCtl.Run(); err != nil {
 		log.Printf("pg_ctl start warning (might be already running): %v", err)
 	}
@@ -49,7 +74,11 @@ func EnsureDependencies() error {
 	time.Sleep(2 * time.Second)
 	
 	// Create database if not exists
-	exec.Command("createdb", "-h", "localhost", "lodan").Run()
+	createdbPath, _ := findPostgresBinary("createdb")
+	if createdbPath == "" {
+		createdbPath = "createdb"
+	}
+	exec.Command(createdbPath, "-h", "localhost", "lodan").Run()
 
 	// 4. Start Ollama if not running
 	log.Println("Starting Ollama...")
@@ -78,7 +107,7 @@ func EnsureDependencies() error {
 
 func installDependencies() error {
 	// Check Postgres
-	_, errPg := exec.LookPath("initdb")
+	_, errPg := findPostgresBinary("initdb")
 	_, errOllama := exec.LookPath("ollama")
 	
 	if errPg == nil && errOllama == nil {
