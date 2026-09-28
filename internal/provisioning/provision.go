@@ -62,7 +62,7 @@ func EnsureDependencies() error {
 		confPath := filepath.Join(dbDir, "postgresql.conf")
 		f, err := os.OpenFile(confPath, os.O_APPEND|os.O_WRONLY, 0644)
 		if err == nil {
-			f.WriteString("\nport = 54320\nlisten_addresses = '127.0.0.1'\n")
+			f.WriteString("\nport = 54320\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = '/tmp'\n")
 			f.Close()
 		} else {
 			log.Printf("failed to append to postgresql.conf: %v", err)
