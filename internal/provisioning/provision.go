@@ -58,6 +58,15 @@ func EnsureDependencies() error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("initdb failed: %w", err)
 		}
+
+		confPath := filepath.Join(dbDir, "postgresql.conf")
+		f, err := os.OpenFile(confPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			f.WriteString("\nport = 54320\nlisten_addresses = '127.0.0.1'\n")
+			f.Close()
+		} else {
+			log.Printf("failed to append to postgresql.conf: %v", err)
+		}
 	}
 
 	// 3. Start PostgreSQL
@@ -82,7 +91,7 @@ func EnsureDependencies() error {
 	if err != nil {
 		return fmt.Errorf("createdb not found after installation: %w", err)
 	}
-	createCmd := exec.Command(createdbPath, "-h", "localhost", "lodan")
+	createCmd := exec.Command(createdbPath, "-h", "127.0.0.1", "-p", "54320", "lodan")
 	createCmd.Stdout = os.Stdout
 	createCmd.Stderr = os.Stderr
 	if err := createCmd.Run(); err != nil {
