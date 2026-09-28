@@ -1,0 +1,123 @@
+package provisioning
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+func EnsureDependencies() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home dir: %w", err)
+	}
+
+	lodanDir := filepath.Join(home, ".lodan")
+	dbDir := filepath.Join(lodanDir, "db")
+
+	if err := os.MkdirAll(lodanDir, 0755); err != nil {
+		return fmt.Errorf("failed to create lodan dir: %w", err)
+	}
+
+	// 1. Install PostgreSQL and Ollama if not present
+	if err := installDependencies(); err != nil {
+		return fmt.Errorf("failed to install dependencies: %w", err)
+	}
+
+	// 2. Initialize PostgreSQL if needed
+	if _, err := os.Stat(filepath.Join(dbDir, "PG_VERSION")); os.IsNotExist(err) {
+		log.Println("Initializing PostgreSQL database cluster at", dbDir)
+		cmd := exec.Command("initdb", "-D", dbDir)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("initdb failed: %w", err)
+		}
+	}
+
+	// 3. Start PostgreSQL
+	log.Println("Starting PostgreSQL...")
+	pgCtl := exec.Command("pg_ctl", "-D", dbDir, "-l", filepath.Join(lodanDir, "postgres.log"), "start")
+	if err := pgCtl.Run(); err != nil {
+		log.Printf("pg_ctl start warning (might be already running): %v", err)
+	}
+	
+	// Wait a moment for postgres to be ready
+	time.Sleep(2 * time.Second)
+	
+	// Create database if not exists
+	exec.Command("createdb", "-h", "localhost", "lodan").Run()
+
+	// 4. Start Ollama if not running
+	log.Println("Starting Ollama...")
+	if err := exec.Command("curl", "-s", "http://localhost:11434/api/version").Run(); err != nil {
+		// Start in background
+		ollamaCmd := exec.Command("ollama", "serve")
+		ollamaCmd.Stdout = os.Stdout
+		ollamaCmd.Stderr = os.Stderr
+		if err := ollamaCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start ollama: %w", err)
+		}
+		time.Sleep(3 * time.Second) // wait for it to start
+	}
+
+	// 5. Pull model
+	log.Println("Pulling ollama model embeddinggemma:300m-qat-q4_0...")
+	pullCmd := exec.Command("ollama", "pull", "embeddinggemma:300m-qat-q4_0")
+	pullCmd.Stdout = os.Stdout
+	pullCmd.Stderr = os.Stderr
+	if err := pullCmd.Run(); err != nil {
+		return fmt.Errorf("failed to pull model: %w", err)
+	}
+
+	return nil
+}
+
+func installDependencies() error {
+	// Check Postgres
+	_, errPg := exec.LookPath("initdb")
+	_, errOllama := exec.LookPath("ollama")
+	
+	if errPg == nil && errOllama == nil {
+		return nil
+	}
+
+	// Use brew or apt
+	hasBrew := false
+	if _, err := exec.LookPath("brew"); err == nil {
+		hasBrew = true
+	}
+
+	hasApt := false
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		hasApt = true
+	}
+
+	if errPg != nil {
+		log.Println("Installing PostgreSQL...")
+		if hasBrew {
+			exec.Command("brew", "install", "postgresql@18", "pgvector").Run()
+		} else if hasApt {
+			exec.Command("sudo", "apt-get", "update").Run()
+			exec.Command("sudo", "apt-get", "install", "-y", "postgresql-16", "postgresql-16-pgvector").Run()
+		} else {
+			return fmt.Errorf("no supported package manager found to install PostgreSQL")
+		}
+	}
+
+	if errOllama != nil {
+		log.Println("Installing Ollama...")
+		// Use standard install script
+		cmd := exec.Command("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to install ollama: %w", err)
+		}
+	}
+
+	return nil
+}

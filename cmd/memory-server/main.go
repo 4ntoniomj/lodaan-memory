@@ -12,6 +12,7 @@ import (
 	"github.com/lodan/memory/internal/installer"
 	"github.com/lodan/memory/internal/mcp"
 	"github.com/lodan/memory/internal/memory"
+	"github.com/lodan/memory/internal/provisioning"
 	"github.com/lodan/memory/internal/storage"
 )
 
@@ -116,6 +117,10 @@ func printUsage() {
 }
 
 func runServer(mode string) {
+	if err := provisioning.EnsureDependencies(); err != nil {
+		log.Fatalf("Failed to provision dependencies: %v", err)
+	}
+
 	cfg := config.LoadConfig()
 
 	db, err := storage.SetupDatabase(cfg.PostgresURI, "migrations")
