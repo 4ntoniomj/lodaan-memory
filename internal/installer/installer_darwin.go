@@ -2,6 +2,10 @@ package installer
 
 import "fmt"
 
+func GetInstaller() Installer {
+	return &darwinInstaller{}
+}
+
 type darwinInstaller struct{}
 
 func (i *darwinInstaller) Install() error {

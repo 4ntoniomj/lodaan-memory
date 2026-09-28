@@ -3,7 +3,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Tabla principal de recuerdos
 CREATE TABLE IF NOT EXISTS memory_items (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    id UUID PRIMARY KEY DEFAULT uuidv7(),
     content TEXT NOT NULL,
     memory_type TEXT NOT NULL,
     active BOOLEAN DEFAULT true,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     conversation_id TEXT,
     turn_index BIGINT,
     importance REAL,
-    embedding vector(384), -- Gemma 300m embeddings dimension
+    embedding vector(768), -- Embedding vector dimension
     embedding_model TEXT,
     content_hash TEXT,
     metadata JSONB,
@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS memory_items_metadata_idx ON memory_items USING GIN (
 
 -- Tabla de relaciones
 CREATE TABLE IF NOT EXISTS memory_links (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    id UUID PRIMARY KEY DEFAULT uuidv7(),
     source_id UUID NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
     target_id UUID NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
     relation_type TEXT NOT NULL,

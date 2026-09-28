@@ -7,72 +7,89 @@ import (
 	"net/http"
 
 	"github.com/lodan/memory/internal/memory"
-	"github.com/modelcontextprotocol/go-sdk/server"
-	"github.com/modelcontextprotocol/go-sdk/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type Server struct {
 	svc *memory.Service
-	srv *server.Server
+	srv *mcp.Server
 }
 
 func NewServer(svc *memory.Service) *Server {
 	return &Server{
 		svc: svc,
-		srv: server.NewServer("lodan-memory-mcp", "1.0.0"),
+		srv: mcp.NewServer(&mcp.Implementation{
+			Name:    "lodan-memory-mcp",
+			Version: "1.0.0",
+		}, nil),
 	}
 }
 
+type MemoryStoreInput struct {
+	Memory string `json:"memory" jsonschema:"description=Información o recuerdo en lenguaje natural para guardar,required"`
+}
+
+type MemorySearchInput struct {
+	Query string `json:"query" jsonschema:"description=Consulta en lenguaje natural para buscar recuerdos,required"`
+	Limit int    `json:"limit,omitempty" jsonschema:"description=Número máximo de recuerdos a recuperar"`
+}
+
 func (s *Server) SetupTools() {
-	s.srv.RegisterTool("memory_store", "Guarda información nueva en la memoria", func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-		content, ok := args["memory"].(string)
-		if !ok {
-			return nil, fmt.Errorf("missing 'memory' argument")
+	mcp.AddTool(s.srv, &mcp.Tool{
+		Name:        "memory_store",
+		Description: "Guarda información nueva en la memoria",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input MemoryStoreInput) (*mcp.CallToolResult, any, error) {
+		if input.Memory == "" {
+			return nil, nil, fmt.Errorf("missing 'memory' argument")
 		}
-		
-		item, err := s.svc.StoreMemory(ctx, content, "fact", "assistant")
+
+		item, err := s.svc.StoreMemory(ctx, input.Memory, "fact", "assistant")
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		
-		return fmt.Sprintf("Memoria guardada con ID: %s", item.ID), nil
+
+		return nil, fmt.Sprintf("Memoria guardada con ID: %s", item.ID), nil
 	})
 
-	s.srv.RegisterTool("memory_search", "Busca recuerdos usando lenguaje natural", func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-		query, ok := args["query"].(string)
-		if !ok {
-			return nil, fmt.Errorf("missing 'query' argument")
+	mcp.AddTool(s.srv, &mcp.Tool{
+		Name:        "memory_search",
+		Description: "Busca recuerdos usando lenguaje natural",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input MemorySearchInput) (*mcp.CallToolResult, any, error) {
+		if input.Query == "" {
+			return nil, nil, fmt.Errorf("missing 'query' argument")
 		}
-		
-		items, err := s.svc.Search(ctx, query, 5)
+
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 5
+		}
+
+		items, err := s.svc.Search(ctx, input.Query, limit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		
-		return items, nil
+
+		return nil, items, nil
 	})
-	
+
 	// En una implementación completa registraríamos memory_get, memory_history, memory_related, memory_get_conversation...
 }
 
 func (s *Server) RunHTTP(port string) error {
 	addr := fmt.Sprintf("127.0.0.1:%s", port)
 	log.Printf("Starting MCP HTTP server on %s", addr)
-	
-	httpTransport := transport.NewHTTPServerTransport("/mcp")
-	
-	http.Handle("/mcp", httpTransport)
-	go func() {
-		if err := s.srv.Serve(httpTransport); err != nil {
-			log.Printf("MCP Server error: %v", err)
-		}
-	}()
-	
-	return http.ListenAndServe(addr, nil)
+
+	httpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return s.srv
+	}, nil)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", httpHandler)
+
+	return http.ListenAndServe(addr, mux)
 }
 
 func (s *Server) RunStdio() error {
-	stdioTransport := transport.NewStdioServerTransport()
 	log.Printf("Starting MCP Stdio server")
-	return s.srv.Serve(stdioTransport)
+	return s.srv.Run(context.Background(), &mcp.StdioTransport{})
 }
