@@ -2,6 +2,10 @@ package installer
 
 import "fmt"
 
+func GetInstaller() Installer {
+	return &windowsInstaller{}
+}
+
 type windowsInstaller struct{}
 
 func (i *windowsInstaller) Install() error {

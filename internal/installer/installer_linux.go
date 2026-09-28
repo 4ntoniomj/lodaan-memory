@@ -2,6 +2,10 @@ package installer
 
 import "fmt"
 
+func GetInstaller() Installer {
+	return &linuxInstaller{}
+}
+
 type linuxInstaller struct{}
 
 func (i *linuxInstaller) Install() error {
