@@ -49,7 +49,7 @@ Cómo se aplica la skill:
 - **Ollama:** cliente HTTP propio con `net/http`, sin SDK, contra `POST /api/embed`.
 - **Configuración:** JSON con la stdlib, más variables de entorno `LODAN_*` que tienen prioridad.
 - **PostgreSQL ≥ 16** (en Windows conda-forge solo tiene pgvector con PG 16), más pgvector ≥ 0.7.0 (`halfvec`, `binary_quantize(halfvec)`). En desarrollo se usa el PostgreSQL 18 del sistema (`/usr/lib/postgresql/18/bin`, con `vector`, `pg_trgm` y `unaccent`).
-- **Modelo de embeddings por defecto:** `embeddinggemma` (768 dimensiones, multilingüe). Prefijos de su ficha: consulta `task: search result | query: `; documento `title: {título} | text: `. Configurable.
+- **Modelo de embeddings por defecto:** `embeddinggemma:300m-qat-q4_0` (768 dimensiones, multilingüe). Prefijos de su ficha: consulta `task: search result | query: `; documento `title: {título} | text: `. Configurable.
 
 ## Rutas y configuración (paquete `config`)
 
@@ -69,7 +69,7 @@ Cómo se aplica la skill:
 | `pg_port` | 54329 |
 | `pg_bin_dir` | autodetectado: `pg_config --bindir` o PATH |
 | `ollama_url` | `http://127.0.0.1:11434` |
-| `embed_model` | `embeddinggemma` |
+| `embed_model` | `embeddinggemma:300m-qat-q4_0` (el modelo con el que se calibraron los umbrales) |
 | `embed_dims` | 768 |
 | `embed_keep_alive` | `-1` (modelo siempre cargado, R12) |
 | `embed_timeout_ms` | 2000 (tiempo máximo de espera del embedding al guardar; si vence, el registro queda pendiente) |

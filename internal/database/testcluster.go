@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -31,6 +32,11 @@ func newLocalCluster(t testing.TB, dims int) (*Cluster, config.Config) {
 	cfg.DataDir = t.TempDir()
 	cfg.EmbedDims = dims
 	cfg.EmbedModel = "test-model"
+	// config.Default leaves PGBinDir empty; honour LODAN_PG_BIN_DIR so tests can use
+	// binaries that are not in the PATH (e.g. the ones installed by micromamba).
+	if dir := os.Getenv("LODAN_PG_BIN_DIR"); dir != "" {
+		cfg.PGBinDir = dir
+	}
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -1,0 +1,16 @@
+{
+  "skill": "lodan-memoria",
+  "version": "1.0.0",
+  "cases": [
+    {"id": "pos_01", "type": "positive", "prompt": "Entreno por la tarde de lunes a viernes, acuérdate", "expected_activation": true, "rationale": "Preferencia personal estable que hay que guardar"},
+    {"id": "pos_02", "type": "positive", "prompt": "¿Qué hice en el último entreno?", "expected_activation": true, "rationale": "Pregunta por el pasado: recall"},
+    {"id": "pos_03", "type": "positive", "prompt": "Hemos decidido que la base de datos use embeddings con pgvector", "expected_activation": true, "rationale": "Decisión con sustancia: remember"},
+    {"id": "pos_04", "type": "positive", "prompt": "¿De qué hablamos la última vez?", "expected_activation": true, "rationale": "Última conversación: session last"},
+    {"id": "pos_05", "type": "positive", "prompt": "recuérdame qué le pasaba al coche", "expected_activation": true, "rationale": "Recuperar contexto de un tema"},
+    {"id": "neg_01", "type": "negative", "prompt": "Implementa un índice nuevo en la tabla memories del código de lodan", "expected_activation": false, "rationale": "Desarrollo del propio lodan: sdd"},
+    {"id": "neg_02", "type": "negative", "prompt": "Instala lodan y configura el servidor MCP en Cursor", "expected_activation": false, "rationale": "Instalación de lodan: instalador (spec 002)"},
+    {"id": "neg_03", "type": "negative", "prompt": "Crea una skill nueva para páginas web", "expected_activation": false, "rationale": "Pertenece a crear-skills"},
+    {"id": "neg_04", "type": "negative", "prompt": "Haz un commit de estos cambios con Conventional Commits", "expected_activation": false, "rationale": "Pertenece a usar-git"},
+    {"id": "neg_05", "type": "negative", "prompt": "Escribe el PRD de una idea de producto nueva", "expected_activation": false, "rationale": "Pertenece a crear-prd"}
+  ]
+}

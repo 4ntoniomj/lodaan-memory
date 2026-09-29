@@ -24,6 +24,6 @@
 | PostgreSQL | base de datos | ≥ 16 (desarrollo: 18) | En Windows, conda-forge solo tiene pgvector para PG 16 |
 | pgvector | base de datos (extensión) | ≥ 0.7.0 (objetivo: 0.8.6) | `halfvec`, `binary_quantize`, HNSW |
 | Ollama | servicio externo | desarrollo: 0.34.4 | Embeddings vía `POST /api/embed` |
-| embeddinggemma | modelo de embeddings | 300m (desarrollo: `300m-qat-q4_0`) | Multilingüe, 768 dimensiones; por defecto, configurable. Umbrales calibrados en `specs/001-nucleo-memoria/calibracion.md` |
+| embeddinggemma | modelo de embeddings | `300m-qat-q4_0` (por defecto) | Multilingüe, 768 dimensiones; por defecto, configurable. Umbrales calibrados en `specs/001-nucleo-memoria/calibracion.md` |
 
 > Go, PostgreSQL, pgvector, Ollama y el modelo no aparecen en `go.mod`: `detectar_stack.py` los reporta como «no detectados» y se mantienen documentados a propósito.

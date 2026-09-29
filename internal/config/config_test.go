@@ -27,7 +27,7 @@ func TestDefault(t *testing.T) {
 	want := Config{
 		PGPort:                54329,
 		OllamaURL:             "http://127.0.0.1:11434",
-		EmbedModel:            "embeddinggemma",
+		EmbedModel:            "embeddinggemma:300m-qat-q4_0",
 		EmbedDims:             768,
 		EmbedKeepAlive:        "-1",
 		EmbedTimeoutMs:        2000,
