@@ -38,7 +38,7 @@ func newStack(tc *database.TestCluster) (Deps, *Server) {
 	topics := topic.NewResolver(tc.Pool, emb, cfg.TopicSimilarity)
 	d := Deps{
 		Pool:     tc.Pool,
-		Memory:   memory.NewService(tc.Pool, emb, topics, sessions, cfg.DupSimilarity),
+		Memory:   memory.NewService(tc.Pool, emb, topics, sessions, cfg.DupSimilarity, time.Duration(cfg.EmbedTimeoutMs)*time.Millisecond),
 		Recall:   recall.NewService(tc.Pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicThreshold: cfg.TopicSimilarity}),
 		Sessions: sessions,
 		Topics:   topics,

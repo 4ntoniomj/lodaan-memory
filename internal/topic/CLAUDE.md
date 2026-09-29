@@ -13,6 +13,10 @@
 | `sdd` | Cualquier cambio no trivial. |
 | `usar-git` | Cualquier commit o rama que la toque. |
 
+## Convenciones específicas
+
+`ResolveWithin` acota el tiempo de embedding con un único plazo para toda la llamada; al vencer, los temas nuevos se crean con embedding NULL (como con `ErrUnavailable`) y `FillPending` los completa. Solo cuenta el plazo propio: si vence el contexto del llamador, es un error.
+
 ## Pruebas
 
 `go test ./internal/topic/...`

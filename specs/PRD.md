@@ -28,7 +28,7 @@ Por orden de prioridad:
 
 | # | Objetivo | Cómo se mide |
 | :--- | :--- | :--- |
-| O1 | **Recuperación rápida a cualquier escala** | Benchmark reproducible en la máquina de referencia (8 GB RAM, sin GPU, SSD) con 10 mil, 1 millón y 10 millones de registros. Objetivo: p95 < 300 ms por búsqueda completa, incluido el embedding de la consulta. Es un objetivo, no un dato verificado: se confirma o se ajusta con la primera medición. |
+| O1 | **Recuperación rápida a cualquier escala** | (a) Búsqueda en la base de datos (candidatos semánticos, reordenación, texto y ficha del tema): p95 < 300 ms con 10 mil, 1 millón y 10 millones de registros en la máquina de referencia, medido con el benchmark reproducible. (b) Embedding de la consulta: coste fijo que no depende del número de registros; se mide y documenta (en la máquina de referencia, 0,5–2,7 s con Ollama en CPU) y se solapa en paralelo con la búsqueda de texto y la ficha. Decisión del usuario del 2026-09-29 (opción A). |
 | O2 | **Pocos tokens** | (a) Recuperar el contexto de un tema cuesta 1 llamada en el caso habitual. (b) Como máximo 6 herramientas MCP expuestas. (c) Toda respuesta tiene un tope de tamaño configurable (valor por defecto: pregunta abierta). |
 | O3 | **Eficacia al recuperar** | Conjunto de consultas reales del usuario, en español, con sus respuestas esperadas: se mide qué porcentaje aparece entre los 10 primeros resultados (recall@10). El umbral se fija tras la primera medición (pregunta abierta). |
 | O4 | **Barato en recursos** | RAM y disco que ocupa lodan en reposo y buscando, medidos y documentados en la máquina de referencia. Objetivo propuesto: que conviva sin problemas con el sistema y las IAs en 8 GB (el tope exacto es una pregunta abierta). |
@@ -142,6 +142,7 @@ Por orden de prioridad:
 | :--- | :--- |
 | O1 no se alcanza a 10 millones con 8 GB de RAM | Medir pronto (el benchmark es de las primeras tareas); probar representaciones más compactas y menos dimensiones; si aun así no llega, documentar el límite real y que decida el usuario. |
 | La IA guarda ruido o se deja lo importante | Una skill con ejemplos concretos del usuario; invalidar un registro tiene que ser fácil; revisar una muestra de sesiones tras las primeras semanas (O6). |
+| El embedding en CPU es lento (0,5–2,7 s por consulta en la máquina de referencia) | Solapar el embedding con la búsqueda de texto y la ficha; caché de consultas; al guardar, tiempo máximo de espera y cálculo en segundo plano. Posible prueba futura de un motor de embeddings dentro del binario (opción B descartada por ahora). |
 | Los temas se fragmentan (sinónimos, variantes) | Detección de etiquetas equivalentes al etiquetar (R4). |
 | La instalación falla en algún sistema (PostgreSQL 16 en Windows, Ollama sin `sudo` en Linux) | Probar en máquinas reales antes de publicar; mensajes de error claros; documentar el procedimiento manual como alternativa. |
 | El modelo elegido rinde mal en español | Probarlo con textos reales del usuario antes de fijarlo. |

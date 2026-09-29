@@ -24,7 +24,25 @@ const (
 	testIdle      = 30 * time.Minute
 	testTimeout   = 90 * time.Second
 	nearWordCount = 40
+	// testEmbedTimeout es el plazo de embedding de los servicios normales: nunca vence.
+	testEmbedTimeout = 30 * time.Second
 )
+
+// slowEmbedder simulates Ollama answering later than the embedding timeout:
+// it waits for delay or for its context, like the real client does.
+type slowEmbedder struct {
+	embedding.FakeEmbedder
+	delay time.Duration
+}
+
+func (e *slowEmbedder) EmbedDocuments(ctx context.Context, docs []embedding.Document) ([][]float32, error) {
+	select {
+	case <-time.After(e.delay):
+		return e.FakeEmbedder.EmbedDocuments(ctx, docs)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("prueba: petición cancelada: %w", ctx.Err())
+	}
+}
 
 // unavailableEmbedder simulates Ollama being down.
 type unavailableEmbedder struct{ dims int }
@@ -62,8 +80,13 @@ func newEnv(ctx context.Context, tc *database.TestCluster) *env {
 // serviceWith builds another Service over the same database that uses emb for
 // the records (topics always use the fake embedder).
 func (e *env) serviceWith(emb embedding.Embedder) *Service {
+	return e.serviceWithTimeout(emb, testEmbedTimeout)
+}
+
+// serviceWithTimeout is serviceWith with a given embedding timeout.
+func (e *env) serviceWithTimeout(emb embedding.Embedder, timeout time.Duration) *Service {
 	res := topic.NewResolver(e.pool, e.emb, testTopicSim)
-	return NewService(e.pool, emb, res, e.mgr, testDup)
+	return NewService(e.pool, emb, res, e.mgr, testDup, timeout)
 }
 
 func (e *env) count(t *testing.T, sql string, args ...any) int {
@@ -404,6 +427,70 @@ func TestService(t *testing.T) {
 		}
 		if len(ids) != 40 {
 			t.Errorf("se guardaron %d ids, se esperaban 40", len(ids))
+		}
+	})
+
+	// Criterio 5 (plazo de embedding).
+	run("un embedding más lento que el plazo deja el registro pendiente", func(t *testing.T, e *env) {
+		slow := e.serviceWithTimeout(&slowEmbedder{FakeEmbedder: embedding.FakeEmbedder{Dimensions: testDims}, delay: 30 * time.Second}, 100*time.Millisecond)
+		start := time.Now()
+		saved, err := slow.Remember(e.ctx, e.tr, []Item{note("Lento", words("lento", 5))})
+		if err != nil {
+			t.Fatalf("Remember con Ollama lento falló: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Errorf("Remember tardó %v: no respetó el plazo de embedding", elapsed)
+		}
+		if len(saved) != 1 || !saved[0].Pending || saved[0].ID <= 0 || len(saved[0].Similar) != 0 {
+			t.Fatalf("se esperaba un registro pendiente: %+v", saved)
+		}
+		if n := e.count(t, `SELECT count(*) FROM memories WHERE id = $1 AND embedding IS NULL AND embedding_model IS NULL`, saved[0].ID); n != 1 {
+			t.Fatalf("el registro #%d debería tener el embedding NULL", saved[0].ID)
+		}
+
+		// El cálculo se completa después, con un embedder normal.
+		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 1 {
+			t.Fatalf("FillPending = %d, %v; se esperaba 1", n, err)
+		}
+	})
+
+	// Criterio 5 (parecidos en segundo plano).
+	run("FillPending sugiere los parecidos de un registro pendiente", func(t *testing.T, e *env) {
+		a := e.save(t, note("Lista de términos", words("termino", nearWordCount)))
+		down := e.serviceWith(unavailableEmbedder{dims: testDims})
+		saved, err := down.Remember(e.ctx, e.tr, []Item{note("Lista de términos", words("termino", nearWordCount-1)+" distinto")})
+		if err != nil || len(saved) != 1 || !saved[0].Pending {
+			t.Fatalf("Remember sin Ollama = %+v, %v; se esperaba un registro pendiente", saved, err)
+		}
+		b := saved[0]
+
+		// Un pendiente que deja de estar vigente antes de completarse no recibe relaciones.
+		savedInv, err := down.Remember(e.ctx, e.tr, []Item{note("Lista de términos", words("termino", nearWordCount-1)+" invalidado")})
+		if err != nil || len(savedInv) != 1 || !savedInv[0].Pending {
+			t.Fatalf("Remember sin Ollama = %+v, %v; se esperaba un registro pendiente", savedInv, err)
+		}
+		e.revise(t, Revision{ID: savedInv[0].ID, Action: "invalidate"})
+
+		if n := e.count(t, `SELECT count(*) FROM memory_relations`); n != 0 {
+			t.Fatalf("antes de FillPending hay %d relaciones, se esperaban 0", n)
+		}
+		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 2 {
+			t.Fatalf("FillPending = %d, %v; se esperaban 2", n, err)
+		}
+		if n := e.count(t, `SELECT count(*) FROM memory_relations
+			WHERE source_id = $1 AND target_id = $2 AND kind = 'related' AND state = 'suggested'`, b.ID, a.ID); n != 1 {
+			t.Errorf("relaciones related suggested #%d -> #%d = %d, se esperaba 1", b.ID, a.ID, n)
+		}
+		if n := e.count(t, `SELECT count(*) FROM memory_relations WHERE source_id = $1`, savedInv[0].ID); n != 0 {
+			t.Errorf("el registro invalidado tiene %d relaciones, se esperaban 0", n)
+		}
+		if n := e.count(t, `SELECT count(*) FROM memory_relations WHERE source_id = $1 OR target_id = $1`, b.ID); n != 1 {
+			t.Errorf("el registro #%d tiene %d relaciones, se esperaba solo 1 (con el vigente)", b.ID, n)
+		}
+
+		// Ejecutarlo otra vez no duplica nada.
+		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 0 {
+			t.Fatalf("segundo FillPending = %d, %v; se esperaba 0", n, err)
 		}
 	})
 

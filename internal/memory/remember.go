@@ -39,8 +39,9 @@ type prepared struct {
 // and are listed in Saved.Similar; that last step is best effort: if it fails,
 // the items are already saved and the error is not reported.
 //
-// If the embedding backend is unavailable the items are saved as pending (NULL
-// embedding); FillPending computes them later. tr may be nil, in which case
+// If the embedding backend is unavailable, or takes longer than the embedding
+// timeout, the items are saved as pending (NULL embedding); FillPending computes
+// the embedding and the similar records later. tr may be nil, in which case
 // the records belong to no session.
 func (s *Service) Remember(ctx context.Context, tr *session.Tracker, items []Item) ([]Saved, error) {
 	if len(items) == 0 {
@@ -83,12 +84,13 @@ func (s *Service) Remember(ctx context.Context, tr *session.Tracker, items []Ite
 		return nil, err
 	}
 
-	// 3. Embeddings en lote; si Ollama no está, todos quedan pendientes.
+	// 3. Embeddings en lote; si Ollama no está o tarda más que embedTimeout,
+	// todos quedan pendientes.
 	docs := make([]embedding.Document, len(todo))
 	for j, i := range todo {
 		docs[j] = embedding.Document{Title: ps[i].title, Text: ps[i].content}
 	}
-	vecs, err := s.embedDocs(ctx, docs)
+	vecs, err := s.embedDocsWithin(ctx, docs)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +148,7 @@ func (s *Service) Remember(ctx context.Context, tr *session.Tracker, items []Ite
 			continue
 		}
 		exclude := append([]int64{p.saved.ID}, replacedList...)
-		s.suggestSimilar(ctx, p, exclude)
+		p.saved.Similar = s.suggestSimilar(ctx, p.saved.ID, p.vec, exclude)
 	}
 	return collectSaved(ps), nil
 }
@@ -191,13 +193,15 @@ func prepareItem(it Item, now time.Time) (prepared, error) {
 }
 
 // resolveTopics resolves the topics of the items in todo with one call to the
-// resolver and assigns to each item its own topics, without repeats.
+// resolver and assigns to each item its own topics, without repeats. New topics
+// are embedded within the embedding timeout; past it they are created with a
+// NULL embedding and topic.Resolver.FillPending completes them later.
 func (s *Service) resolveTopics(ctx context.Context, ps []prepared, todo []int) error {
 	var union []string
 	for _, i := range todo {
 		union = append(union, ps[i].names...)
 	}
-	res, err := s.topics.Resolve(ctx, union)
+	res, err := s.topics.ResolveWithin(ctx, union, s.embedTimeout)
 	if err != nil {
 		return err
 	}
@@ -219,7 +223,7 @@ func (s *Service) resolveTopics(ctx context.Context, ps []prepared, todo []int) 
 		if r, ok := bySlug[slug]; ok {
 			return topic.Resolution{Topic: r.Topic, Requested: slug}, nil
 		}
-		one, err := s.topics.Resolve(ctx, []string{name})
+		one, err := s.topics.ResolveWithin(ctx, []string{name}, s.embedTimeout)
 		if err != nil {
 			return topic.Resolution{}, err
 		}
@@ -349,23 +353,27 @@ func (s *Service) insertItem(ctx context.Context, tx pgx.Tx, p *prepared, sessio
 	return nil
 }
 
-// suggestSimilar looks for active records similar to a new one and stores a
-// suggested "related" relation to each. Errors are ignored on purpose: the
-// record is already saved and this only adds hints.
-func (s *Service) suggestSimilar(ctx context.Context, p *prepared, exclude []int64) {
-	near, err := Nearest(ctx, s.pool, p.vec, s.emb.Dims(), neighborCandidates, maxNeighbors, s.dupThreshold, exclude)
+// suggestSimilar looks for active records similar to the record id (whose
+// embedding is vec), leaving out excludeIDs, and stores a suggested "related"
+// relation from id to each. It returns the similar records found. It is shared
+// by Remember and FillPending. Errors are ignored on purpose: the record is
+// already saved and this only adds hints.
+func (s *Service) suggestSimilar(ctx context.Context, id int64, vec []float32, excludeIDs []int64) []Neighbor {
+	near, err := Nearest(ctx, s.pool, vec, s.emb.Dims(), neighborCandidates, maxNeighbors, s.dupThreshold, excludeIDs)
 	if err != nil {
-		return
+		return nil
 	}
+	var similar []Neighbor
 	for _, n := range near {
 		_, err := s.pool.Exec(ctx, `INSERT INTO memory_relations (source_id, target_id, kind, state)
 			VALUES ($1, $2, 'related', 'suggested')
-			ON CONFLICT DO NOTHING`, p.saved.ID, n.ID)
+			ON CONFLICT DO NOTHING`, id, n.ID)
 		if err != nil {
 			continue
 		}
-		p.saved.Similar = append(p.saved.Similar, n)
+		similar = append(similar, n)
 	}
+	return similar
 }
 
 // insertMemoryTopics links a record to topics in memory_topics.

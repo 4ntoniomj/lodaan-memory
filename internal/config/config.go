@@ -22,6 +22,7 @@ type Config struct {
 	EmbedModel         string  `json:"embed_model"`
 	EmbedDims          int     `json:"embed_dims"`
 	EmbedKeepAlive     string  `json:"embed_keep_alive"`
+	EmbedTimeoutMs     int     `json:"embed_timeout_ms"` // max wait for the embedding when saving
 	HTTPAddr           string  `json:"http_addr"`
 	RecallMaxBytes     int     `json:"recall_max_bytes"`
 	SessionIdleMinutes int     `json:"session_idle_minutes"`
@@ -38,6 +39,7 @@ func Default() Config {
 		EmbedModel:         "embeddinggemma",
 		EmbedDims:          768,
 		EmbedKeepAlive:     "-1",
+		EmbedTimeoutMs:     2000,
 		HTTPAddr:           "127.0.0.1:7438",
 		RecallMaxBytes:     6000,
 		SessionIdleMinutes: 30,
@@ -107,6 +109,7 @@ func applyEnv(cfg *Config) error {
 	}{
 		{"LODAN_PG_PORT", &cfg.PGPort},
 		{"LODAN_EMBED_DIMS", &cfg.EmbedDims},
+		{"LODAN_EMBED_TIMEOUT_MS", &cfg.EmbedTimeoutMs},
 		{"LODAN_RECALL_MAX_BYTES", &cfg.RecallMaxBytes},
 		{"LODAN_SESSION_IDLE_MINUTES", &cfg.SessionIdleMinutes},
 	}
@@ -150,6 +153,9 @@ func (c Config) Validate() error {
 	}
 	if c.EmbedDims <= 0 {
 		return fmt.Errorf("embed_dims debe ser mayor que 0, y es %d", c.EmbedDims)
+	}
+	if c.EmbedTimeoutMs < 100 {
+		return fmt.Errorf("embed_timeout_ms debe ser al menos 100, y es %d", c.EmbedTimeoutMs)
 	}
 	if !(c.DupSimilarity > 0 && c.DupSimilarity <= 1) {
 		return fmt.Errorf("dup_similarity debe estar en (0,1], y es %v", c.DupSimilarity)

@@ -164,6 +164,20 @@ func (r *Resolver) Detect(_ context.Context, queryVec []float32) (Topic, float64
 // It uses the pool rather than a transaction: computing embeddings is slow and
 // must not hold a transaction open.
 func (r *Resolver) Resolve(ctx context.Context, raw []string) ([]Resolution, error) {
+	return r.ResolveWithin(ctx, raw, 0)
+}
+
+// ResolveWithin is Resolve with a limit on the time spent computing embeddings.
+// embedTimeout is a single budget shared by all the new topics of the call
+// (zero or negative means no limit). When it runs out, the topics still to be
+// embedded are created with a NULL embedding, exactly as if the embedding
+// backend were unavailable, and FillPending completes them later. Database
+// queries are not subject to the limit.
+func (r *Resolver) ResolveWithin(ctx context.Context, raw []string, embedTimeout time.Duration) ([]Resolution, error) {
+	var deadline time.Time
+	if embedTimeout > 0 {
+		deadline = time.Now().Add(embedTimeout)
+	}
 	var out []Resolution
 	seenSlug := make(map[string]bool, len(raw))
 	seenID := make(map[int32]bool, len(raw))
@@ -175,7 +189,7 @@ func (r *Resolver) Resolve(ctx context.Context, raw []string) ([]Resolution, err
 		}
 		seenSlug[slug] = true
 
-		res, err := r.resolveOne(ctx, slug)
+		res, err := r.resolveOne(ctx, slug, deadline)
 		if err != nil {
 			return nil, err
 		}
@@ -188,8 +202,9 @@ func (r *Resolver) Resolve(ctx context.Context, raw []string) ([]Resolution, err
 	return out, nil
 }
 
-// resolveOne resolves a single normalized, non-empty slug.
-func (r *Resolver) resolveOne(ctx context.Context, slug string) (Resolution, error) {
+// resolveOne resolves a single normalized, non-empty slug. A non-zero
+// embedDeadline limits the time spent embedding it (see embedSlug).
+func (r *Resolver) resolveOne(ctx context.Context, slug string, embedDeadline time.Time) (Resolution, error) {
 	// 1. Existe: se usa tal cual y se marca como usado.
 	var id int32
 	err := r.pool.QueryRow(ctx,
@@ -202,7 +217,7 @@ func (r *Resolver) resolveOne(ctx context.Context, slug string) (Resolution, err
 	}
 
 	// 2. No existe: se calcula su embedding.
-	vec, err := r.embedSlug(ctx, slug)
+	vec, err := r.embedSlug(ctx, slug, embedDeadline)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -249,9 +264,17 @@ func (r *Resolver) resolveOne(ctx context.Context, slug string) (Resolution, err
 }
 
 // embedSlug computes the embedding of a slug. It returns a nil vector, and no
-// error, if the embedding backend is unavailable.
-func (r *Resolver) embedSlug(ctx context.Context, slug string) ([]float32, error) {
-	vecs, err := r.emb.EmbedDocuments(ctx, []embedding.Document{{Text: slugText(slug)}})
+// error, if the embedding backend is unavailable or if a non-zero deadline
+// expires. The latter only counts when it is the embedding deadline that
+// expired: if the caller's own context is done, that is an error.
+func (r *Resolver) embedSlug(ctx context.Context, slug string, deadline time.Time) ([]float32, error) {
+	ectx := ctx
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
+		ectx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	vecs, err := r.emb.EmbedDocuments(ectx, []embedding.Document{{Text: slugText(slug)}})
 	switch {
 	case err == nil:
 		if len(vecs) != 1 {
@@ -259,6 +282,8 @@ func (r *Resolver) embedSlug(ctx context.Context, slug string) ([]float32, error
 		}
 		return vecs[0], nil
 	case errors.Is(err, embedding.ErrUnavailable):
+		return nil, nil
+	case !deadline.IsZero() && errors.Is(err, context.DeadlineExceeded) && ectx.Err() != nil && ctx.Err() == nil:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("no se pudo calcular el embedding del tema %q: %w", slug, err)

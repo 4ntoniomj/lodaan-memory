@@ -45,7 +45,7 @@ const (
 	topicsTTL = time.Minute
 
 	defaultMaxBytes     = 6000
-	defaultCandidates   = 200
+	defaultCandidates   = 400 // benchmark 1M: recall@10 0,89, p95 total 88 ms
 	defaultDefaultLimit = 8
 	defaultMaxLimit     = 20
 	defaultCacheSize    = 256

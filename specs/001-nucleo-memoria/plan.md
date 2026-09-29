@@ -72,6 +72,7 @@ Cómo se aplica la skill:
 | `embed_model` | `embeddinggemma` |
 | `embed_dims` | 768 |
 | `embed_keep_alive` | `-1` (modelo siempre cargado, R12) |
+| `embed_timeout_ms` | 2000 (tiempo máximo de espera del embedding al guardar; si vence, el registro queda pendiente) |
 | `http_addr` | `127.0.0.1:7438` |
 | `recall_max_bytes` | 6000 |
 | `session_idle_minutes` | 30 |
@@ -185,14 +186,15 @@ Detalles de funcionamiento:
    - el slug se normaliza a kebab-case, en minúsculas y sin tildes;
    - si existe, se usa;
    - si no, se compara el embedding del slug contra la caché de temas en memoria y, si la similitud es ≥ `topic_similarity`, se reutiliza el tema existente;
-   - si no hay ninguno equivalente, se crea.
-3. Calcular los embeddings en lote con una sola llamada a `/api/embed` para todos los ítems. Si falla, `embedding` queda NULL (pendiente).
+   - si no hay ninguno equivalente, se crea;
+   - el embedding de los temas nuevos comparte un único plazo de `embed_timeout_ms` para toda la llamada; si vence, el tema se crea con embedding NULL y el worker (`topic.FillPending`) lo completa después.
+3. Calcular los embeddings en lote con una sola llamada a `/api/embed` para todos los ítems, con un plazo máximo de `embed_timeout_ms` (contexto con plazo propio). Si Ollama no está disponible o el plazo vence, `embedding` queda NULL (pendiente) y la respuesta lo indica. Si vence el contexto del llamador, es un error, no un pendiente.
 4. En una sola transacción:
    - insertar en `memories` y `memory_topics`;
    - si hay `key` y un registro vigente con la misma clave, pasar el antiguo a `superseded` y crear la relación `supersedes` `confirmed`;
    - actualizar `session_topics`.
-5. Si hay embedding: buscar como mucho 3 registros vigentes con similitud ≥ `dup_similarity`. Se usa el índice binario y se reordena con el vector completo, excluyendo el propio registro. Por cada uno se crea una relación `related` `suggested` y se devuelve en la respuesta.
-6. **Worker de pendientes:** una goroutine por proceso recorre cada 30 s los registros con `embedding IS NULL` usando `FOR UPDATE SKIP LOCKED`, en lotes de 32. Es seguro con varios procesos a la vez.
+5. Si hay embedding: buscar como mucho 3 registros vigentes con similitud ≥ `dup_similarity`. Se usa el índice binario y se reordena con el vector completo, excluyendo el propio registro. Por cada uno se crea una relación `related` `suggested` (`ON CONFLICT DO NOTHING`) y se devuelve en la respuesta. Los registros pendientes no pasan por este paso al guardar: lo hace el worker (paso 6).
+6. **Worker de pendientes:** una goroutine por proceso recorre cada 30 s los registros con `embedding IS NULL` usando `FOR UPDATE SKIP LOCKED`, en lotes de 32. Es seguro con varios procesos a la vez. Tras confirmar cada lote, para cada registro que siga vigente ejecuta la misma detección de parecidos del paso 5 (función común con `Remember`) y crea las relaciones `related` `suggested`; los que ya no estén vigentes solo reciben el embedding. Este paso es best effort y no afecta al resultado del lote. La respuesta de `remember` avisa de que embedding y parecidos quedan pendientes y se calculan en segundo plano.
 
 ## Algoritmo de recuperación (`recall`)
 

@@ -11,7 +11,7 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	for _, name := range []string{
 		"LODAN_PG_PORT", "LODAN_PG_BIN_DIR", "LODAN_OLLAMA_URL", "LODAN_EMBED_MODEL",
-		"LODAN_EMBED_DIMS", "LODAN_EMBED_KEEP_ALIVE", "LODAN_HTTP_ADDR",
+		"LODAN_EMBED_DIMS", "LODAN_EMBED_KEEP_ALIVE", "LODAN_EMBED_TIMEOUT_MS", "LODAN_HTTP_ADDR",
 		"LODAN_RECALL_MAX_BYTES", "LODAN_SESSION_IDLE_MINUTES",
 		"LODAN_DUP_SIMILARITY", "LODAN_TOPIC_SIMILARITY",
 	} {
@@ -30,6 +30,7 @@ func TestDefault(t *testing.T) {
 		EmbedModel:         "embeddinggemma",
 		EmbedDims:          768,
 		EmbedKeepAlive:     "-1",
+		EmbedTimeoutMs:     2000,
 		HTTPAddr:           "127.0.0.1:7438",
 		RecallMaxBytes:     6000,
 		SessionIdleMinutes: 30,
@@ -97,10 +98,39 @@ func TestLoadPrioridadJSONEntorno(t *testing.T) {
 	}
 }
 
+func TestEmbedTimeoutMs(t *testing.T) {
+	dir := isolate(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.EmbedTimeoutMs != 2000 {
+		t.Errorf("EmbedTimeoutMs = %d, se esperaba el defecto 2000", c.EmbedTimeoutMs)
+	}
+
+	if err := os.WriteFile(dir+"/config.json", []byte(`{"embed_timeout_ms": 3000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = Load(); err != nil || c.EmbedTimeoutMs != 3000 {
+		t.Fatalf("con JSON: EmbedTimeoutMs = %d, %v; se esperaba 3000", c.EmbedTimeoutMs, err)
+	}
+
+	t.Setenv("LODAN_EMBED_TIMEOUT_MS", "500")
+	if c, err = Load(); err != nil || c.EmbedTimeoutMs != 500 {
+		t.Fatalf("con entorno: EmbedTimeoutMs = %d, %v; se esperaba 500", c.EmbedTimeoutMs, err)
+	}
+
+	t.Setenv("LODAN_EMBED_TIMEOUT_MS", "99")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "embed_timeout_ms") {
+		t.Fatalf("un valor por debajo de 100 debía rechazarse nombrando embed_timeout_ms, error: %v", err)
+	}
+}
+
 func TestLoadEntornoMalFormado(t *testing.T) {
 	casos := []struct{ name, value string }{
 		{"LODAN_PG_PORT", "abc"},
 		{"LODAN_EMBED_DIMS", "7.5"},
+		{"LODAN_EMBED_TIMEOUT_MS", "2s"},
 		{"LODAN_RECALL_MAX_BYTES", "mucho"},
 		{"LODAN_SESSION_IDLE_MINUTES", "x"},
 		{"LODAN_DUP_SIMILARITY", "alta"},
@@ -140,6 +170,7 @@ func TestValidate(t *testing.T) {
 		"pg_port cero":       func(c *Config) { c.PGPort = 0 },
 		"pg_port alto":       func(c *Config) { c.PGPort = 65536 },
 		"dims cero":          func(c *Config) { c.EmbedDims = 0 },
+		"timeout bajo":       func(c *Config) { c.EmbedTimeoutMs = 99 },
 		"dup cero":           func(c *Config) { c.DupSimilarity = 0 },
 		"topic mayor que 1":  func(c *Config) { c.TopicSimilarity = 1.1 },
 		"recall bytes bajo":  func(c *Config) { c.RecallMaxBytes = 499 },

@@ -48,6 +48,7 @@ Cubre los objetivos O1, O2, O3 y O5 del PRD (en O5, solo la conexión MCP) y la 
 5. - GIVEN Ollama no disponible
      WHEN se llama a `remember`
      THEN el registro se guarda con el embedding pendiente, la respuesta lo indica, y al volver Ollama el embedding se calcula sin intervención.
+     Lo mismo ocurre si Ollama tarda más que `embed_timeout_ms` (por defecto 2000): el registro queda pendiente y el cálculo del embedding y de los parecidos se completa en segundo plano.
 6. - GIVEN existe el tema `entrenamiento`
      WHEN se guarda con un tema nuevo cuyo embedding supera el umbral de equivalencia con él
      THEN se usa `entrenamiento` y la respuesta lo indica.
@@ -109,6 +110,7 @@ Cubre los objetivos O1, O2, O3 y O5 del PRD (en O5, solo la conexión MCP) y la 
       - tamaño de tabla e índices;
       - RAM.
     - La ejecución a 10 millones queda documentada como hecha o pendiente, con motivo.
+    - El objetivo de latencia (p95 < 300 ms) aplica a la búsqueda en la base de datos; el embedding se reporta aparte como coste fijo (PRD O1).
 21. - `go test ./...` pasa.
     - Los tests que necesitan PostgreSQL arrancan un clúster temporal; si no hay binarios, se saltan con un mensaje claro.
     - `go vet ./...` queda limpio.

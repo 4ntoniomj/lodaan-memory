@@ -85,7 +85,7 @@ func TestFormatSaved(t *testing.T) {
 		},
 		{ID: 45, Title: "Igual", Duplicate: true},
 	})
-	want := "#123 guardado · temas: entrenamiento (gym→entrenamiento) · embedding pendiente · sustituye #45 · parecidos: #12 «otro» (0.93)\n" +
+	want := "#123 guardado · temas: entrenamiento (gym→entrenamiento) · embedding y parecidos pendientes (se calculan en segundo plano) · sustituye #45 · parecidos: #12 «otro» (0.93)\n" +
 		"#45 ya existía (duplicado): «Igual»"
 	if got != want {
 		t.Errorf("formatSaved =\n%s\nquería\n%s", got, want)

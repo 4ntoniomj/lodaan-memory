@@ -161,6 +161,9 @@ type Service struct {
 	topics       *topic.Resolver
 	sessions     *session.Manager
 	dupThreshold float64
+	// embedTimeout bounds the wait for the embedding in Remember; zero or
+	// negative means no limit.
+	embedTimeout time.Duration
 
 	mu      sync.Mutex
 	modelID int16
@@ -168,9 +171,11 @@ type Service struct {
 }
 
 // NewService creates a Service. Records whose cosine similarity to a new one
-// reaches dupThreshold are reported as possible duplicates.
-func NewService(pool *pgxpool.Pool, emb embedding.Embedder, topics *topic.Resolver, sessions *session.Manager, dupThreshold float64) *Service {
-	return &Service{pool: pool, emb: emb, topics: topics, sessions: sessions, dupThreshold: dupThreshold}
+// reaches dupThreshold are reported as possible duplicates. If Remember waits
+// longer than embedTimeout for the embedding, the records are saved as pending
+// and FillPending completes them later (zero or negative: no limit).
+func NewService(pool *pgxpool.Pool, emb embedding.Embedder, topics *topic.Resolver, sessions *session.Manager, dupThreshold float64, embedTimeout time.Duration) *Service {
+	return &Service{pool: pool, emb: emb, topics: topics, sessions: sessions, dupThreshold: dupThreshold, embedTimeout: embedTimeout}
 }
 
 // NormalizeContent lowercases s, collapses every run of whitespace into one
@@ -218,6 +223,22 @@ func (s *Service) embedDocs(ctx context.Context, docs []embedding.Document) ([][
 	default:
 		return nil, fmt.Errorf("no se pudo calcular el embedding: %w", err)
 	}
+}
+
+// embedDocsWithin is embedDocs with the embedTimeout limit. If that limit
+// expires (and not the caller's context) it behaves as if the backend were
+// unavailable: nil vectors and no error, so the records stay pending.
+func (s *Service) embedDocsWithin(ctx context.Context, docs []embedding.Document) ([][]float32, error) {
+	if s.embedTimeout <= 0 {
+		return s.embedDocs(ctx, docs)
+	}
+	tctx, cancel := context.WithTimeout(ctx, s.embedTimeout)
+	defer cancel()
+	vecs, err := s.embedDocs(tctx, docs)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && tctx.Err() != nil && ctx.Err() == nil {
+		return nil, nil
+	}
+	return vecs, err
 }
 
 // halfParam converts a vector into a query parameter; a nil vector becomes NULL.

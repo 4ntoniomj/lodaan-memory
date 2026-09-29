@@ -65,6 +65,49 @@ func (e unavailableEmbedder) EmbedQuery(context.Context, string) ([]float32, err
 func (e unavailableEmbedder) Model() string { return "unavailable" }
 func (e unavailableEmbedder) Dims() int     { return e.dims }
 
+// slowEmbedder simulates Ollama answering later than the embedding timeout: it
+// waits for delay or for its context, like the real client does.
+type slowEmbedder struct {
+	embedding.FakeEmbedder
+	delay time.Duration
+}
+
+func (e *slowEmbedder) EmbedDocuments(ctx context.Context, docs []embedding.Document) ([][]float32, error) {
+	select {
+	case <-time.After(e.delay):
+		return e.FakeEmbedder.EmbedDocuments(ctx, docs)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("prueba: petición cancelada: %w", ctx.Err())
+	}
+}
+
+// El plazo del embedding solo cuenta como "no disponible" cuando vence el
+// plazo propio; si vence el contexto del llamador, es un error. No necesita base de datos.
+func TestEmbedSlugPlazo(t *testing.T) {
+	slow := &slowEmbedder{FakeEmbedder: embedding.FakeEmbedder{Dimensions: testDims}, delay: time.Hour}
+	r := NewResolver(nil, slow, testThreshold)
+
+	// Vence el plazo del embedding: sin vector y sin error.
+	vec, err := r.embedSlug(context.Background(), "mi-coche", time.Now().Add(50*time.Millisecond))
+	if vec != nil || err != nil {
+		t.Errorf("con el plazo vencido: vec=%v, err=%v; se esperaba nil y sin error", vec, err)
+	}
+
+	// Vence antes el contexto del llamador: es un error.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := r.embedSlug(ctx, "mi-coche", time.Now().Add(time.Hour)); err == nil {
+		t.Error("con el contexto del llamador vencido se esperaba un error")
+	}
+
+	// Sin plazo propio, un contexto vencido también es un error.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, err := r.embedSlug(ctx2, "mi-coche", time.Time{}); err == nil {
+		t.Error("sin plazo propio y con el contexto vencido se esperaba un error")
+	}
+}
+
 func TestResolver(t *testing.T) {
 	tc := database.NewTestCluster(t, testDims)
 	fake := (&embedding.FakeEmbedder{Dimensions: testDims}).WithAlias("gym", "entrenamiento")
@@ -271,6 +314,34 @@ func TestResolver(t *testing.T) {
 
 		if n, err := r.FillPending(ctx, 10); err != nil || n != 0 {
 			t.Errorf("segundo FillPending = %d, %v; se esperaba 0 y sin error", n, err)
+		}
+	})
+
+	run("ResolveWithin: un embedding lento crea los temas sin embedding", func(t *testing.T, ctx context.Context) {
+		slow := NewResolver(tc.Pool, &slowEmbedder{FakeEmbedder: embedding.FakeEmbedder{Dimensions: testDims}, delay: time.Hour}, testThreshold)
+		start := time.Now()
+		got, err := slow.ResolveWithin(ctx, []string{"uno dos", "tres cuatro"}, 100*time.Millisecond)
+		if err != nil {
+			t.Fatalf("ResolveWithin con Ollama lento falló: %v", err)
+		}
+		if len(got) != 2 || got[0].Topic.Slug != "uno-dos" || got[1].Topic.Slug != "tres-cuatro" {
+			t.Fatalf("resolución inesperada: %+v", got)
+		}
+		// El plazo es único para toda la llamada: no se espera 100 ms por tema.
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Errorf("ResolveWithin tardó %v: no respetó el plazo", elapsed)
+		}
+		if n := countPending(t, ctx); n != 2 {
+			t.Fatalf("hay %d temas sin embedding, se esperaban 2", n)
+		}
+
+		// FillPending los completa después.
+		r := NewResolver(tc.Pool, fake, testThreshold)
+		if n, err := r.FillPending(ctx, 10); err != nil || n != 2 {
+			t.Fatalf("FillPending = %d, %v; se esperaban 2", n, err)
+		}
+		if n := countPending(t, ctx); n != 0 {
+			t.Errorf("quedan %d temas sin embedding, se esperaba 0", n)
 		}
 	})
 

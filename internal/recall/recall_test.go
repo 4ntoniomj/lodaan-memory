@@ -84,7 +84,7 @@ func newEnv(ctx context.Context, tc *database.TestCluster) *env {
 		emb:  emb,
 		mgr:  mgr,
 		tr:   mgr.NewTracker("test"),
-		mem:  memory.NewService(tc.Pool, emb, res, mgr, testDup),
+		mem:  memory.NewService(tc.Pool, emb, res, mgr, testDup, testTimeout),
 	}
 }
 
@@ -173,7 +173,7 @@ func TestValidation(t *testing.T) {
 func TestOptionsDefaultsAndLimit(t *testing.T) {
 	svc := NewService(nil, &embedding.FakeEmbedder{}, nil, Options{TopicThreshold: 0.5})
 	o := svc.opts
-	if o.MaxBytes != 6000 || o.Candidates != 200 || o.DefaultLimit != 8 || o.MaxLimit != 20 || o.CacheSize != 256 {
+	if o.MaxBytes != 6000 || o.Candidates != 400 || o.DefaultLimit != 8 || o.MaxLimit != 20 || o.CacheSize != 256 {
 		t.Errorf("valores por defecto inesperados: %+v", o)
 	}
 	if svc.MaxBytes() != 6000 {

@@ -102,7 +102,7 @@ func formatOneSaved(sv memory.Saved) string {
 		parts = append(parts, "temas: "+strings.Join(names, ", "))
 	}
 	if sv.Pending {
-		parts = append(parts, "embedding pendiente")
+		parts = append(parts, "embedding y parecidos pendientes (se calculan en segundo plano)")
 	}
 	if len(sv.Superseded) > 0 {
 		ids := make([]string, len(sv.Superseded))
