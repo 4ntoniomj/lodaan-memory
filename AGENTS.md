@@ -9,7 +9,10 @@ lodan es un servicio local de memoria persistente para cualquier IA compatible c
 | `sdd` | Siempre, para cualquier tarea de desarrollo: clasifica simple/compleja antes de tocar código. |
 | `usar-git` | Siempre: ningún commit, rama o PR fuera de su flujo. `main` solo recibe fusiones aprobadas. |
 | `screaming-architecture` | Al crear una funcionalidad o carpeta nueva en `internal/`, y en cada auditoría (mantiene `CODEBASE.md`). |
-| `crear-skills` | Para la skill de uso de lodan (spec 003) o si falta una skill para una tarea. |
+| `crear-skills` | Si falta una skill para una tarea. |
+| `lodan-memoria` | Siempre, en toda conversación: guarda en lodan lo que tenga sustancia y recupera con `recall` en cuanto salga un tema. |
+
+**IMPORTANTE:** toda la información con sustancia (decisiones, datos estables, preferencias, eventos, notas) se guarda en lodan siguiendo `lodan-memoria`, no en ficheros de memoria.
 
 **IMPORTANTE:** ninguna tarea de desarrollo se implementa sin apoyarse en al menos una skill. Si al terminar de planificar no hay ninguna instalada que encaje, créala con `crear-skills` antes de escribir código.
 
