@@ -83,18 +83,8 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signalContext()
 	defer stop()
+	// Doctor prints its own report; here only the exit code is decided.
 	results := install.NewInstaller(cfg, os.Stdin, stdout).Doctor(ctx)
-	labels := map[install.Level]string{install.LevelOK: "ok", install.LevelWarn: "aviso", install.LevelError: "error"}
-	for _, r := range results {
-		line := fmt.Sprintf("[%s] %s", labels[r.Level], r.Name)
-		if r.Detail != "" {
-			line += ": " + r.Detail
-		}
-		fmt.Fprintln(stdout, line)
-		if r.Fix != "" {
-			fmt.Fprintf(stdout, "        → %s\n", r.Fix)
-		}
-	}
 	if install.DoctorHasErrors(results) {
 		return 1
 	}
