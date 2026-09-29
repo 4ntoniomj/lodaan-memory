@@ -23,8 +23,11 @@ Subcomandos:
   db        Gestiona el PostgreSQL local: init | start | stop | status
   migrate   Aplica las migraciones pendientes
   status    Muestra el estado de la base de datos y de Ollama
-  service   Gestiona el servicio de sistema: run | start | stop | restart | enable | disable | status
-  bench    Ejecuta el benchmark (--rows, --out)
+  install   Instala lodan: PostgreSQL, Ollama, servicio de sistema, clientes MCP y skill
+  doctor    Diagnostica la instalación, con una línea por comprobación
+  uninstall Desinstala lodan (los datos se conservan salvo con --purge)
+  service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
+  bench     Ejecuta el benchmark (--rows, --out)
 
 Usa "lodan <subcomando> -h" para ver las opciones de cada uno.
 `
@@ -55,6 +58,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runStatus(rest, stdout, stderr)
 	case "service":
 		return runService(rest, stdout, stderr)
+	case "install":
+		return runInstall(rest, stdout, stderr)
+	case "uninstall":
+		return runUninstall(rest, stdout, stderr)
+	case "doctor":
+		return runDoctor(rest, stdout, stderr)
 	case "bench":
 		return runBench(rest, stderr)
 	default:

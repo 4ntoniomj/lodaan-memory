@@ -249,6 +249,58 @@ func TestRunSupervisorNoLanzaOtroPostgres(t *testing.T) {
 	}
 }
 
+// usePgCtlMode forces the launch mode that Windows uses (pg_ctl start) for one test.
+func usePgCtlMode(t *testing.T) {
+	t.Helper()
+	oldUse, oldPoll := usePgCtl, pgCtlPollInterval
+	usePgCtl = true
+	pgCtlPollInterval = 200 * time.Millisecond
+	t.Cleanup(func() { usePgCtl, pgCtlPollInterval = oldUse, oldPoll })
+}
+
+func TestRunSupervisorConPgCtlArrancaYParaAlCancelar(t *testing.T) {
+	usePgCtlMode(t)
+	env := newSupervisorEnv(t)
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	if !env.running(t) {
+		t.Fatal("PostgreSQL debería estar en marcha")
+	}
+	if !strings.Contains(env.logs.String(), "con pg_ctl") {
+		t.Errorf("el log no indica el arranque con pg_ctl:\n%s", env.logs.String())
+	}
+
+	start := time.Now()
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+	if d := time.Since(start); d > pgStopTimeout+5*time.Second {
+		t.Errorf("la parada tardó %s, por encima del máximo de %s", d, pgStopTimeout)
+	}
+	if env.running(t) {
+		t.Error("PostgreSQL sigue en marcha tras cancelar el contexto")
+	}
+}
+
+func TestRunSupervisorConPgCtlFallaSiPostgresSeCae(t *testing.T) {
+	usePgCtlMode(t)
+	env := newSupervisorEnv(t)
+	_, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	ctx, cancelStop := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelStop()
+	if err := env.cluster.Stop(ctx); err != nil {
+		t.Fatalf("no se pudo parar PostgreSQL: %v", err)
+	}
+	err := awaitExit(t, errc, 30*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "terminó por su cuenta") {
+		t.Fatalf("se esperaba un error porque PostgreSQL se cayó, y es: %v", err)
+	}
+}
+
 func TestRunSupervisorFallaSiElPostgresExternoSePara(t *testing.T) {
 	old := pgWatchInterval
 	pgWatchInterval = 200 * time.Millisecond

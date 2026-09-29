@@ -32,6 +32,10 @@ func runService(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "run":
 		return runServiceRun(rest, stderr)
+	case "install":
+		return runServiceInstall(rest, stdout, stderr)
+	case "uninstall":
+		return runServiceUninstall(rest, stdout, stderr)
 	case "start", "stop", "restart", "enable", "disable", "status":
 	default:
 		fmt.Fprintf(stderr, "lodan service: acción desconocida %q\nUso: %s\n", action, serviceUsage)
@@ -89,9 +93,19 @@ func runService(args []string, stdout, stderr io.Writer) int {
 
 // runServiceRun implements `lodan service run`: the process that the service manager keeps alive.
 func runServiceRun(args []string, stderr io.Writer) int {
-	flags := newFlagSet("service run", "lodan service run", stderr)
+	flags := newFlagSet("service run", "lodan service run [--env K=V]...", stderr)
+	var envs stringList
+	flags.Var(&envs, "env", "variable de entorno K=V aplicada antes de cargar la configuración (repetible)")
 	if code, done := parseFlags(flags, args); done {
 		return code
+	}
+	for _, kv := range envs {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			fmt.Fprintf(stderr, "lodan service run: --env mal formado %q (se espera K=V)\n", kv)
+			return 2
+		}
+		os.Setenv(k, v)
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintf(stderr, "lodan service run: argumentos inesperados: %s\n", strings.Join(flags.Args(), " "))
@@ -186,3 +200,6 @@ func permissionHint(err error) string {
 	}
 	return "Pista: ejecútalo con sudo."
 }
+
+// goos returns the operating system the binary runs on.
+func goos() string { return runtime.GOOS }

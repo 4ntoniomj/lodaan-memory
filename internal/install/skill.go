@@ -63,8 +63,13 @@ func simulated(dryRun bool) string {
 // ~/.gemini/config/skills exists, also there. The destination is replaced
 // completely. scripts/*.py are written executable. The old prototype skill
 // lodan-memory, if present, is moved (not deleted) to
-// <same folder>/.lodan-memory.bak-lodan. It returns one message per action.
-func InstallSkill(fsys fs.FS, env Env, dryRun bool) ([]string, error) {
+// <backupDir>/lodan-memory (with a numeric suffix if that already exists). The
+// backup must live outside any skills folder, or the client would load the old
+// skill next to the new one. It returns one message per action.
+func InstallSkill(fsys fs.FS, env Env, backupDir string, dryRun bool) ([]string, error) {
+	if backupDir == "" {
+		return nil, errors.New("falta el directorio de copias de seguridad de la skill antigua")
+	}
 	src, err := fs.Sub(fsys, skillName)
 	if err != nil {
 		return nil, err
@@ -78,7 +83,7 @@ func InstallSkill(fsys fs.FS, env Env, dryRun bool) ([]string, error) {
 	}
 	var report []string
 	for _, root := range roots {
-		msg, err := retireOldSkill(root, dryRun)
+		msg, err := retireOldSkill(root, backupDir, dryRun)
 		if err != nil {
 			return report, err
 		}
@@ -96,9 +101,9 @@ func InstallSkill(fsys fs.FS, env Env, dryRun bool) ([]string, error) {
 	return report, nil
 }
 
-// retireOldSkill moves <root>/lodan-memory to <root>/.lodan-memory.bak-lodan
-// (with a numeric suffix if that already exists).
-func retireOldSkill(root string, dryRun bool) (string, error) {
+// retireOldSkill moves <root>/lodan-memory to <backupDir>/lodan-memory (with a
+// numeric suffix if that already exists).
+func retireOldSkill(root, backupDir string, dryRun bool) (string, error) {
 	old := filepath.Join(root, oldSkillName)
 	if _, err := os.Lstat(old); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -106,20 +111,74 @@ func retireOldSkill(root string, dryRun bool) (string, error) {
 		}
 		return "", err
 	}
-	bak := filepath.Join(root, "."+oldSkillName+backupSuffix)
+	bak := filepath.Join(backupDir, oldSkillName)
 	base := bak
-	for n := 1; ; n++ {
+	for n := 1; n < 1000; n++ {
 		if _, err := os.Lstat(bak); errors.Is(err, fs.ErrNotExist) {
 			break
 		}
 		bak = fmt.Sprintf("%s.%d", base, n)
 	}
 	if !dryRun {
-		if err := os.Rename(old, bak); err != nil {
+		if err := os.MkdirAll(backupDir, 0o700); err != nil {
+			return "", fmt.Errorf("no se pudo crear %s: %w", backupDir, err)
+		}
+		if err := moveTree(old, bak); err != nil {
 			return "", fmt.Errorf("no se pudo retirar la skill antigua %s: %w", old, err)
 		}
 	}
 	return fmt.Sprintf("%sskill antigua retirada: %s -> %s", simulated(dryRun), old, bak), nil
+}
+
+// moveTree renames src to dst; if that fails (for example across file systems)
+// it copies the tree and removes the original.
+func moveTree(src, dst string) error {
+	renameErr := os.Rename(src, dst)
+	if renameErr == nil {
+		return nil
+	}
+	if err := copyTree(src, dst); err != nil {
+		_ = os.RemoveAll(dst)
+		return errors.Join(renameErr, err)
+	}
+	return os.RemoveAll(src)
+}
+
+// copyTree copies a directory tree (regular files, directories and symlinks;
+// other file types are skipped).
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			link, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		case d.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, info.Mode().Perm())
+		default:
+			return nil
+		}
+	})
 }
 
 // copySkillTree copies src into a temporary folder next to dest and then swaps
@@ -330,6 +389,124 @@ func InstallInstructions(env Env, dryRun bool) ([]string, error) {
 		report = append(report, fmt.Sprintf("%s%s: %s", simulated(dryRun), path, action))
 	}
 	return report, nil
+}
+
+// CheckSkill verifies that every skills folder lodan writes to holds a
+// lodan-memoria identical to the embedded one and no old lodan-memory. On
+// failure the detail explains what is wrong.
+func CheckSkill(fsys fs.FS, env Env) (ok bool, detail string) {
+	src, err := fs.Sub(fsys, skillName)
+	if err != nil {
+		return false, err.Error()
+	}
+	roots, err := skillRoots(env)
+	if err != nil {
+		return false, err.Error()
+	}
+	var dests []string
+	for _, root := range roots {
+		dest := filepath.Join(root, skillName)
+		if !dirExists(dest) {
+			return false, fmt.Sprintf("falta la skill en %s", dest)
+		}
+		if diff := skillDiff(src, dest); diff != "" {
+			return false, fmt.Sprintf("la skill de %s no coincide con la embebida (%s)", dest, diff)
+		}
+		if _, err := os.Lstat(filepath.Join(root, oldSkillName)); err == nil {
+			return false, fmt.Sprintf("sigue instalada la skill antigua %s", filepath.Join(root, oldSkillName))
+		}
+		dests = append(dests, dest)
+	}
+	return true, strings.Join(dests, ", ")
+}
+
+// skillDiff returns a short description of the first difference between the
+// embedded skill and the folder dest, or "" when they are identical.
+func skillDiff(src fs.FS, dest string) string {
+	diff := ""
+	_ = fs.WalkDir(src, ".", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			diff = walkErr.Error()
+			return fs.SkipAll
+		}
+		if d.IsDir() {
+			return nil
+		}
+		want, err := fs.ReadFile(src, p)
+		if err != nil {
+			diff = err.Error()
+			return fs.SkipAll
+		}
+		got, err := os.ReadFile(filepath.Join(dest, filepath.FromSlash(p)))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			diff = "falta " + p
+		case err != nil:
+			diff = err.Error()
+		case string(got) != string(want):
+			diff = p + " es distinto"
+		default:
+			return nil
+		}
+		return fs.SkipAll
+	})
+	if diff != "" {
+		return diff
+	}
+	// Files in dest that the embedded skill does not have.
+	_ = filepath.WalkDir(dest, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			diff = walkErr.Error()
+			return fs.SkipAll
+		}
+		rel, err := filepath.Rel(dest, p)
+		if err != nil || rel == "." {
+			return nil
+		}
+		if _, err := fs.Stat(src, filepath.ToSlash(rel)); err != nil {
+			diff = "sobra " + filepath.ToSlash(rel)
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return diff
+}
+
+// CheckInstructions verifies that the global instruction files of the clients
+// whose folder exists carry the current lodan block (or the hand-written
+// section that InstallInstructions respects).
+func CheckInstructions(env Env) (ok bool, detail string) {
+	if env.Home == "" {
+		return false, "no se conoce el directorio personal del usuario"
+	}
+	var checked, problems []string
+	for _, t := range instructionTargets(env) {
+		if !dirExists(t.dir) {
+			continue
+		}
+		path := filepath.Join(t.dir, t.file)
+		text := ""
+		if data, err := os.ReadFile(path); err == nil {
+			text = string(data)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			problems = append(problems, fmt.Sprintf("%s (%v)", path, err))
+			continue
+		}
+		checked = append(checked, path)
+		if t.manualCheck && !strings.Contains(text, instructionsStart) && hasManualSection(text) {
+			continue
+		}
+		if _, act, err := applyInstructionBlock(text); err != nil || act != "sin cambios" {
+			problems = append(problems, path)
+		}
+	}
+	if len(problems) > 0 {
+		return false, "falta el bloque de lodan o está desactualizado en: " + strings.Join(problems, ", ")
+	}
+	if len(checked) == 0 {
+		return true, "no hay carpetas de instrucciones globales que gestionar"
+	}
+	return true, strings.Join(checked, ", ")
 }
 
 // UninstallInstructions removes the marked block (markers included) from the

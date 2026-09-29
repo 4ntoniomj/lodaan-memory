@@ -41,12 +41,22 @@ const (
 	warmUpTimeout = 2 * time.Minute
 )
 
-// Variables (not constants) so the tests can shorten them.
+// Variables (not constants) so the tests can change them.
 var (
 	// pgWatchInterval is how often a PostgreSQL that the supervisor did not launch is checked.
 	pgWatchInterval = 30 * time.Second
 	// warmUpRetry is the pause between two warm-up attempts.
 	warmUpRetry = 30 * time.Second
+
+	// usePgCtl selects how the supervisor launches PostgreSQL. On Windows it is true: postgres.exe
+	// refuses to run under an administrator account and the service runs as LocalSystem, but
+	// pg_ctl creates a restricted token for the server it starts, so `pg_ctl start` works from
+	// that account while a foreground postgres.exe child would not. On the other systems the
+	// server runs in the foreground as a child, which is what systemd and launchd expect.
+	usePgCtl = runtime.GOOS == "windows"
+
+	// pgCtlPollInterval is how often the state of a PostgreSQL launched with pg_ctl is checked.
+	pgCtlPollInterval = 10 * time.Second
 )
 
 // RunSupervisor is the body of the system service (`lodan service run`). It prepares the
@@ -56,6 +66,7 @@ var (
 //
 // On cancellation it stops the PostgreSQL it launched (fast shutdown) and returns nil. If that
 // PostgreSQL exits on its own it returns an error, so the service manager restarts the service.
+// On Windows PostgreSQL is not a child process but is started with `pg_ctl start` (see usePgCtl).
 // If PostgreSQL was already running on the same data directory (started with `lodan db start`
 // or by the lazy start of `lodan serve`), no second one is launched: only the maintenance runs,
 // and the state is checked every 30 seconds.
@@ -111,10 +122,17 @@ func prepareCluster(ctx context.Context, cfg config.Config, cluster *database.Cl
 	if running {
 		logger.Printf("PostgreSQL ya estaba en marcha sobre %s: no se lanza otro, se continúa solo con el mantenimiento", cfg.PGDataDir())
 	} else {
-		if pg, err = startPostgres(cluster, cfg); err != nil {
-			return nil, err
+		if usePgCtl {
+			if pg, err = startPostgresPgCtl(ctx, cluster, cfg, logger); err != nil {
+				return nil, err
+			}
+			logger.Printf("PostgreSQL arrancado con pg_ctl; log en %s", pg.logPath)
+		} else {
+			if pg, err = startPostgres(cluster, cfg); err != nil {
+				return nil, err
+			}
+			logger.Printf("PostgreSQL arrancado en primer plano (pid %d); log en %s", pg.cmd.Process.Pid, pg.logPath)
 		}
-		logger.Printf("PostgreSQL arrancado en primer plano (pid %d); log en %s", pg.cmd.Process.Pid, pg.logPath)
 	}
 
 	if err := waitReady(ctx, cluster, pg, pgReadyTimeout); err != nil {
@@ -240,13 +258,24 @@ func warmUp(ctx context.Context, emb *embedding.Ollama, logger *log.Logger) {
 	}
 }
 
-// postgresProc is the PostgreSQL process launched in the foreground by the supervisor.
+// postgresProc is the PostgreSQL launched by the supervisor: a foreground child process, or a
+// server started with pg_ctl (cmd is nil then).
 type postgresProc struct {
 	cmd     *exec.Cmd
 	logPath string
-	// done is closed when the process has exited; err (its Wait result) is valid after that.
+	// done is closed by finish when the server is gone; err (its Wait result, or the reason the
+	// pg_ctl watcher gave up) is valid after that.
 	done chan struct{}
 	err  error
+	once sync.Once
+}
+
+// finish records why the server is gone and closes done. Only the first call has effect.
+func (p *postgresProc) finish(err error) {
+	p.once.Do(func() {
+		p.err = err
+		close(p.done)
+	})
 }
 
 // startPostgres launches `postgres -D <data>` without pg_ctl, so it stays a child of the
@@ -272,9 +301,46 @@ func startPostgres(cluster *database.Cluster, cfg config.Config) (*postgresProc,
 
 	p := &postgresProc{cmd: cmd, logPath: logPath, done: make(chan struct{})}
 	go func() {
-		p.err = cmd.Wait()
+		err := cmd.Wait()
 		_ = logFile.Close()
-		close(p.done)
+		p.finish(err)
+	}()
+	return p, nil
+}
+
+// startPostgresPgCtl launches PostgreSQL with `pg_ctl start -w` (the server runs detached from
+// the supervisor, its output goes to <LogsDir>/postgres.log) and starts a watcher that polls
+// `pg_ctl status` every pgCtlPollInterval: when the server is no longer running, done is closed
+// and the supervisor fails, so the service manager restarts the service.
+func startPostgresPgCtl(ctx context.Context, cluster *database.Cluster, cfg config.Config, logger *log.Logger) (*postgresProc, error) {
+	if err := cluster.Start(ctx); err != nil {
+		return nil, err
+	}
+	p := &postgresProc{
+		logPath: filepath.Join(cfg.LogsDir(), "postgres.log"),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		ticker := time.NewTicker(pgCtlPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-p.done:
+				return
+			case <-ticker.C:
+				sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				running, err := cluster.Status(sctx)
+				cancel()
+				if err != nil {
+					logger.Printf("no se pudo consultar el estado de PostgreSQL: %v", err)
+					continue
+				}
+				if !running {
+					p.finish(errors.New("pg_ctl status indica que ya no está en marcha"))
+					return
+				}
+			}
+		}
 	}()
 	return p, nil
 }
@@ -290,13 +356,18 @@ func (p *postgresProc) stop(cluster *database.Cluster, cfg config.Config, timeou
 
 	logger.Printf("parando PostgreSQL (parada rápida)")
 	deadline := time.Now().Add(timeout)
-	if runtime.GOOS == "windows" {
-		// Windows has no signals: pg_ctl talks to the postmaster through its own channel.
+	if p.cmd == nil || runtime.GOOS == "windows" {
+		// Windows has no signals: pg_ctl talks to the postmaster through its own channel. A
+		// server launched with pg_ctl (no child process to signal) is also stopped this way.
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		out, err := exec.CommandContext(ctx, cluster.Exe("pg_ctl"), "stop", "-m", "fast", "-D", cfg.PGDataDir()).CombinedOutput()
 		cancel()
 		if err != nil {
 			logger.Printf("pg_ctl stop falló: %v\n%s", err, out)
+		} else if p.cmd == nil {
+			// pg_ctl stop waits for the shutdown, so the server is gone: no need to wait
+			// for the next poll of the watcher.
+			p.finish(nil)
 		}
 	} else if err := p.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		// SIGINT is PostgreSQL's fast shutdown.
@@ -310,8 +381,13 @@ func (p *postgresProc) stop(cluster *database.Cluster, cfg config.Config, timeou
 		return nil
 	case <-timer.C:
 	}
-	_ = p.cmd.Process.Kill()
-	<-p.done
+	if p.cmd == nil {
+		// Nothing to kill: stop the watcher and report it.
+		p.finish(errors.New("PostgreSQL no paró a tiempo"))
+	} else {
+		_ = p.cmd.Process.Kill()
+		<-p.done
+	}
 	return fmt.Errorf("PostgreSQL no paró en %s: se forzó su cierre", timeout)
 }
 

@@ -32,9 +32,10 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 	clWrite(t, filepath.Join(geminiSkills, "lodan-memory", "SKILL.md"), "antigua gemini\n")
 	clWrite(t, filepath.Join(claudeSkills, "lodan-memoria", "obsoleto.txt"), "sobra\n")
 	clWrite(t, filepath.Join(claudeSkills, "otra-skill", "SKILL.md"), "ajena\n")
+	backupDir := filepath.Join(t.TempDir(), "backups", "skills")
 
 	// Dry run: nothing changes.
-	report, err := InstallSkill(skFS(), env, true)
+	report, err := InstallSkill(skFS(), env, backupDir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +45,11 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 	if !pathExists(filepath.Join(claudeSkills, "lodan-memory")) || !pathExists(filepath.Join(claudeSkills, "lodan-memoria", "obsoleto.txt")) {
 		t.Fatal("el dry run no debe tocar nada")
 	}
+	if pathExists(backupDir) {
+		t.Fatal("el dry run no debe crear el directorio de copias")
+	}
 
-	report, err = InstallSkill(skFS(), env, false)
+	report, err = InstallSkill(skFS(), env, backupDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +66,16 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 		if pathExists(filepath.Join(root, "lodan-memory")) {
 			t.Fatalf("la skill antigua debe retirarse de %s", root)
 		}
-		if !pathExists(filepath.Join(root, ".lodan-memory.bak-lodan", "SKILL.md")) {
-			t.Fatalf("falta la copia de la skill antigua en %s", root)
+		// The backup must not stay inside a skills folder (it would load twice).
+		if pathExists(filepath.Join(root, ".lodan-memory.bak-lodan")) {
+			t.Fatalf("la copia de la skill antigua no debe quedar dentro de %s", root)
 		}
+	}
+	if clRead(t, filepath.Join(backupDir, "lodan-memory", "SKILL.md")) != "antigua claude\n" {
+		t.Fatal("falta la copia de la skill antigua de Claude en el directorio de copias")
+	}
+	if clRead(t, filepath.Join(backupDir, "lodan-memory.1", "SKILL.md")) != "antigua gemini\n" {
+		t.Fatal("falta la copia de la skill antigua de Gemini (con sufijo) en el directorio de copias")
 	}
 	if pathExists(filepath.Join(claudeSkills, "lodan-memoria", "obsoleto.txt")) {
 		t.Fatal("el reemplazo debe ser completo")
@@ -90,7 +101,7 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 	}
 
 	// Second run: replaces again without errors and without another retirement.
-	report, err = InstallSkill(skFS(), env, false)
+	report, err = InstallSkill(skFS(), env, backupDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,9 +118,9 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 		if pathExists(filepath.Join(root, "lodan-memoria")) {
 			t.Fatalf("lodan-memoria debería haberse quitado de %s", root)
 		}
-		if !pathExists(filepath.Join(root, ".lodan-memory.bak-lodan")) {
-			t.Fatalf("la copia de la skill antigua debe conservarse en %s", root)
-		}
+	}
+	if !pathExists(filepath.Join(backupDir, "lodan-memory", "SKILL.md")) {
+		t.Fatal("la copia de la skill antigua debe conservarse")
 	}
 	if !pathExists(filepath.Join(claudeSkills, "otra-skill", "SKILL.md")) {
 		t.Fatal("no se debe tocar otras skills")
@@ -118,7 +129,7 @@ func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
 
 func TestSkillSoloClaudeSiNoHayGemini(t *testing.T) {
 	env := skEnv(t)
-	report, err := InstallSkill(skFS(), env, false)
+	report, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false)
 	if err != nil || len(report) != 1 {
 		t.Fatalf("InstallSkill: %v %v", report, err)
 	}
@@ -131,24 +142,121 @@ func TestSkillSinSKILLmdEsError(t *testing.T) {
 	env := skEnv(t)
 	fsys := fstest.MapFS{}
 	fsys["lodan-memoria/EXAMPLE.md"] = &fstest.MapFile{Data: []byte("x")}
-	if _, err := InstallSkill(fsys, env, false); err == nil {
+	if _, err := InstallSkill(fsys, env, filepath.Join(t.TempDir(), "backups"), false); err == nil {
 		t.Fatal("debería fallar si la skill embebida no tiene SKILL.md")
+	}
+}
+
+func TestSkillSinDirectorioDeCopiasEsError(t *testing.T) {
+	env := skEnv(t)
+	if _, err := InstallSkill(skFS(), env, "", false); err == nil {
+		t.Fatal("debería fallar sin directorio de copias")
 	}
 }
 
 func TestSkillRetiradaAntiguaNoPisaCopiaPrevia(t *testing.T) {
 	env := skEnv(t)
 	root := filepath.Join(env.Home, ".claude", "skills")
-	clWrite(t, filepath.Join(root, ".lodan-memory.bak-lodan", "SKILL.md"), "copia previa\n")
+	backupDir := filepath.Join(t.TempDir(), "backups", "skills")
+	clWrite(t, filepath.Join(backupDir, "lodan-memory", "SKILL.md"), "copia previa\n")
 	clWrite(t, filepath.Join(root, "lodan-memory", "SKILL.md"), "antigua\n")
-	if _, err := InstallSkill(skFS(), env, false); err != nil {
+	if _, err := InstallSkill(skFS(), env, backupDir, false); err != nil {
 		t.Fatal(err)
 	}
-	if clRead(t, filepath.Join(root, ".lodan-memory.bak-lodan", "SKILL.md")) != "copia previa\n" {
+	if clRead(t, filepath.Join(backupDir, "lodan-memory", "SKILL.md")) != "copia previa\n" {
 		t.Fatal("la copia previa no debe sobrescribirse")
 	}
-	if clRead(t, filepath.Join(root, ".lodan-memory.bak-lodan.1", "SKILL.md")) != "antigua\n" {
+	if clRead(t, filepath.Join(backupDir, "lodan-memory.1", "SKILL.md")) != "antigua\n" {
 		t.Fatal("la skill antigua debe ir a una carpeta con sufijo")
+	}
+}
+
+func TestCheckSkill(t *testing.T) {
+	env := skEnv(t)
+	backupDir := filepath.Join(t.TempDir(), "backups")
+	root := filepath.Join(env.Home, ".claude", "skills")
+
+	if ok, detail := CheckSkill(skFS(), env); ok || !strings.Contains(detail, "falta la skill") {
+		t.Fatalf("sin instalar debería fallar: %v %q", ok, detail)
+	}
+	if _, err := InstallSkill(skFS(), env, backupDir, false); err != nil {
+		t.Fatal(err)
+	}
+	if ok, detail := CheckSkill(skFS(), env); !ok {
+		t.Fatalf("tras instalar debería estar bien: %q", detail)
+	}
+
+	// A modified file, an extra file and the old skill are all reported.
+	clWrite(t, filepath.Join(root, "lodan-memoria", "SKILL.md"), "editada\n")
+	if ok, detail := CheckSkill(skFS(), env); ok || !strings.Contains(detail, "SKILL.md es distinto") {
+		t.Fatalf("archivo modificado: %v %q", ok, detail)
+	}
+	if _, err := InstallSkill(skFS(), env, backupDir, false); err != nil {
+		t.Fatal(err)
+	}
+	clWrite(t, filepath.Join(root, "lodan-memoria", "extra.md"), "sobra\n")
+	if ok, detail := CheckSkill(skFS(), env); ok || !strings.Contains(detail, "sobra extra.md") {
+		t.Fatalf("archivo sobrante: %v %q", ok, detail)
+	}
+	if _, err := InstallSkill(skFS(), env, backupDir, false); err != nil {
+		t.Fatal(err)
+	}
+	clWrite(t, filepath.Join(root, "lodan-memory", "SKILL.md"), "antigua\n")
+	if ok, detail := CheckSkill(skFS(), env); ok || !strings.Contains(detail, "skill antigua") {
+		t.Fatalf("skill antigua: %v %q", ok, detail)
+	}
+}
+
+func TestCheckInstructions(t *testing.T) {
+	env := skEnv(t)
+	if ok, detail := CheckInstructions(env); !ok || !strings.Contains(detail, "no hay carpetas") {
+		t.Fatalf("sin carpetas no hay nada que comprobar: %v %q", ok, detail)
+	}
+
+	codex := filepath.Join(env.Home, ".codex", "AGENTS.md")
+	clWrite(t, codex, "# Reglas\n")
+	if ok, detail := CheckInstructions(env); ok || !strings.Contains(detail, codex) {
+		t.Fatalf("sin bloque debería fallar: %v %q", ok, detail)
+	}
+	if _, err := InstallInstructions(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if ok, detail := CheckInstructions(env); !ok {
+		t.Fatalf("con el bloque debería estar bien: %q", detail)
+	}
+	clWrite(t, codex, strings.Replace(clRead(t, codex), "prioridad", "XXXX", 1))
+	if ok, _ := CheckInstructions(env); ok {
+		t.Fatal("un bloque desactualizado debe reportarse")
+	}
+
+	// The hand-written section counts as present in CLAUDE.md.
+	env2 := skEnv(t)
+	clWrite(t, filepath.Join(env2.Home, ".claude", "CLAUDE.md"), "# Mío\n\n## Memoria persistente: lodan\n\n- regla\n")
+	if ok, detail := CheckInstructions(env2); !ok {
+		t.Fatalf("la sección manual cuenta como presente: %q", detail)
+	}
+}
+
+func TestCopyTree(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "origen")
+	dst := filepath.Join(t.TempDir(), "destino")
+	clWrite(t, filepath.Join(src, "a.txt"), "a\n")
+	clWrite(t, filepath.Join(src, "sub", "b.txt"), "b\n")
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink("a.txt", filepath.Join(src, "enlace")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if clRead(t, filepath.Join(dst, "a.txt")) != "a\n" || clRead(t, filepath.Join(dst, "sub", "b.txt")) != "b\n" {
+		t.Fatal("copia incompleta")
+	}
+	if runtime.GOOS != "windows" {
+		if target, err := os.Readlink(filepath.Join(dst, "enlace")); err != nil || target != "a.txt" {
+			t.Fatalf("el enlace simbólico debe conservarse: %q %v", target, err)
+		}
 	}
 }
 
