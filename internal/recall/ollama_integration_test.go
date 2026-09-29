@@ -27,9 +27,10 @@ const (
 	itOllamaURL    = "http://127.0.0.1:11434"
 	itDefaultModel = "embeddinggemma"
 	itDims         = 768
-	// Default thresholds of the plan (spec 001).
-	itDupSimilarity   = 0.92
-	itTopicSimilarity = 0.85
+	// Default thresholds of the plan (spec 001), calibrated in specs/001-nucleo-memoria/calibracion.md.
+	itDupSimilarity         = 0.92
+	itTopicSimilarity       = 0.72
+	itTopicDetectSimilarity = 0.40
 	// itEmbedTimeout is embed_timeout_ms of the memory service in TestParafrasisReal.
 	itEmbedTimeout = 30 * time.Second
 )
@@ -284,10 +285,12 @@ func TestCalibracionSimilitudes(t *testing.T) {
 		t.Logf("%-10s %.4f  %q <-> %s", label, sim, p.query, p.topic)
 	}
 
-	// Summary, to decide the thresholds (plan: dup_similarity 0,92 and topic_similarity 0,85).
+	// Summary, to decide the thresholds (plan: dup_similarity 0,92, topic_similarity 0,72
+	// and topic_detect_similarity 0,40).
 	eq, di := topicStats["equivalente"], topicStats["distinto"]
 	nd, pa, re, un := recStats["casi-duplicado"], recStats["parafrasis"], recStats["relacionado"], recStats["no-relacionado"]
-	t.Logf("=== RESUMEN (umbrales actuales: tema %.2f, duplicado %.2f) ===", itTopicSimilarity, itDupSimilarity)
+	t.Logf("=== RESUMEN (umbrales actuales: tema %.2f, detección %.2f, duplicado %.2f) ===",
+		itTopicSimilarity, itTopicDetectSimilarity, itDupSimilarity)
 	t.Logf("temas:     mínimo de equivalentes %.4f (media %.4f) | máximo de distintos %.4f (media %.4f)",
 		eq.min, eq.mean(), di.max, di.mean())
 	t.Logf("registros: mínimo de casi duplicados %.4f (media %.4f) | máximo de paráfrasis %.4f (media %.4f), relacionados %.4f (media %.4f), no relacionados %.4f (media %.4f)",
@@ -339,7 +342,7 @@ func TestParafrasisReal(t *testing.T) {
 	tr := mgr.NewTracker("test-ollama")
 	resolver := topic.NewResolver(tc.Pool, emb, itTopicSimilarity)
 	mem := memory.NewService(tc.Pool, emb, resolver, mgr, itDupSimilarity, itEmbedTimeout)
-	svc := NewService(tc.Pool, emb, resolver, Options{TopicThreshold: itTopicSimilarity})
+	svc := NewService(tc.Pool, emb, resolver, Options{TopicDetectThreshold: itTopicDetectSimilarity})
 
 	items := []memory.Item{
 		// 0..3 are the targets of the paraphrases.
@@ -424,10 +427,7 @@ func TestParafrasisReal(t *testing.T) {
 			}
 			detected := "ninguno"
 			if res.Topic != nil {
-				detected = res.Topic.Slug
-				if res.TopicDetected {
-					detected += " (detectado)"
-				}
+				detected = fmt.Sprintf("%s (%s)", res.Topic.Slug, res.TopicVia)
 			}
 
 			sections := []struct {

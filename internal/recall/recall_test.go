@@ -25,7 +25,9 @@ const (
 	testTimeout  = 90 * time.Second
 	testIdle     = 30 * time.Minute
 	testDup      = 0.95
-	testTopicSim = 0.85
+	testTopicSim = 0.72
+	// testDetectSim es el umbral de detección por defecto de la configuración.
+	testDetectSim = 0.40
 	// highThreshold evita detectar temas por casualidad con el embedder falso.
 	highThreshold = 0.95
 	// lowThreshold permite detectarlos con consultas de pocas palabras.
@@ -91,7 +93,7 @@ func newEnv(ctx context.Context, tc *database.TestCluster) *env {
 // service builds a recall Service that embeds queries with emb. Each Service has
 // its own topic resolver, whose cache it loads by itself.
 func (e *env) service(emb embedding.Embedder, o Options) *Service {
-	return NewService(e.pool, emb, topic.NewResolver(e.pool, e.emb, o.TopicThreshold), o)
+	return NewService(e.pool, emb, topic.NewResolver(e.pool, e.emb, testTopicSim), o)
 }
 
 // save stores one record and returns its id.
@@ -159,7 +161,7 @@ func wantErr(t *testing.T, err error, substr string) {
 
 func TestValidation(t *testing.T) {
 	// La validación ocurre antes de tocar la base de datos: no hace falta clúster.
-	svc := NewService(nil, &embedding.FakeEmbedder{Dimensions: testDims}, nil, Options{TopicThreshold: testTopicSim})
+	svc := NewService(nil, &embedding.FakeEmbedder{Dimensions: testDims}, nil, Options{TopicDetectThreshold: testDetectSim})
 	ctx := context.Background()
 
 	for _, q := range []string{"", "   ", "\n\t "} {
@@ -171,7 +173,7 @@ func TestValidation(t *testing.T) {
 }
 
 func TestOptionsDefaultsAndLimit(t *testing.T) {
-	svc := NewService(nil, &embedding.FakeEmbedder{}, nil, Options{TopicThreshold: 0.5})
+	svc := NewService(nil, &embedding.FakeEmbedder{}, nil, Options{TopicDetectThreshold: 0.5})
 	o := svc.opts
 	if o.MaxBytes != 6000 || o.Candidates != 400 || o.DefaultLimit != 8 || o.MaxLimit != 20 || o.CacheSize != 256 {
 		t.Errorf("valores por defecto inesperados: %+v", o)
@@ -258,11 +260,14 @@ func TestRecall(t *testing.T) {
 		e.invalidate(t, inv)
 		n1 := e.save(t, item(memory.KindNote, "Reflexión", "Reflexión general sobre la constancia en el entrenamiento", "", day(2026, 9, 2)))
 
-		svc := e.service(e.emb, Options{TopicThreshold: lowThreshold})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: lowThreshold})
 		res := e.recall(t, svc, Request{Query: "último entrenamiento"})
 
 		if res.Topic == nil || res.Topic.Slug != "entrenamiento" || !res.TopicDetected {
 			t.Fatalf("Topic = %+v, TopicDetected = %v; se esperaba entrenamiento detectado", res.Topic, res.TopicDetected)
+		}
+		if res.TopicVia != TopicViaSimilarity {
+			t.Errorf("TopicVia = %q, se esperaba %q", res.TopicVia, TopicViaSimilarity)
 		}
 		if res.TextOnly {
 			t.Error("TextOnly no debería estar activo")
@@ -309,13 +314,114 @@ func TestRecall(t *testing.T) {
 	run("temas pedidos: se usa el primero que existe", func(t *testing.T, e *env) {
 		pref := e.save(t, memory.Item{Title: "Café", Content: "Prefiere el café sin azúcar",
 			Kind: memory.KindPreference, Topics: []string{"café"}})
-		svc := e.service(e.emb, Options{TopicThreshold: highThreshold})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
 		res := e.recall(t, svc, Request{Query: "azúcar", Topics: []string{"  ", "Inexistente", "CAFÉ"}})
 		if res.Topic == nil || res.Topic.Slug != "cafe" || res.TopicDetected {
 			t.Fatalf("Topic = %+v, TopicDetected = %v; se esperaba cafe pedido", res.Topic, res.TopicDetected)
 		}
+		if res.TopicVia != TopicViaRequested {
+			t.Errorf("TopicVia = %q, se esperaba %q", res.TopicVia, TopicViaRequested)
+		}
 		if got := idsOf(res.Profile); !slices.Equal(got, []int64{pref}) {
 			t.Errorf("Profile = %v, se esperaba [%d]", got, pref)
+		}
+	})
+
+	// Detección por votación: la consulta no se parece al nombre del tema (con el umbral
+	// alto no hay detección por similitud), pero los dos primeros resultados pertenecen a él.
+	// Con el embedder falso, una consulta de dos palabras nunca supera 0,71 de coseno con
+	// un tema de una sola palabra.
+	seedVote := func(t *testing.T, e *env) (r1, r2, pref, other int64) {
+		t.Helper()
+		r1 = e.save(t, memory.Item{Title: "Ejercicio con pesas", Content: "Ejercicio de kettlebell pesado en el sótano",
+			Kind: memory.KindNote, Topics: []string{"entrenamiento"}})
+		r2 = e.save(t, memory.Item{Title: "Balanceo", Content: "Balanceo con kettlebell pesado",
+			Kind: memory.KindNote, Topics: []string{"entrenamiento"}})
+		pref = e.save(t, memory.Item{Title: "Horario", Content: "Entrena por la tarde",
+			Kind: memory.KindPreference, Topics: []string{"entrenamiento"}})
+		other = e.save(t, memory.Item{Title: "Matrícula", Content: "Matrícula del coche 1234",
+			Kind: memory.KindNote, Topics: []string{"coche"}})
+		return r1, r2, pref, other
+	}
+	checkVote := func(t *testing.T, svc *Service, e *env, textOnly bool) {
+		t.Helper()
+		r1, r2, pref, other := seedVote(t, e)
+		res := e.recall(t, svc, Request{Query: "kettlebell pesado", Limit: 3})
+
+		if res.Topic == nil || res.Topic.Slug != "entrenamiento" || !res.TopicDetected || res.TopicVia != TopicViaVote {
+			t.Fatalf("Topic = %+v, TopicDetected = %v, TopicVia = %q; se esperaba entrenamiento por votación",
+				res.Topic, res.TopicDetected, res.TopicVia)
+		}
+		if res.TextOnly != textOnly {
+			t.Errorf("TextOnly = %v, se esperaba %v", res.TextOnly, textOnly)
+		}
+		// La ficha se lee tras la fusión.
+		if got := idsOf(res.Profile); !slices.Equal(got, []int64{pref}) {
+			t.Errorf("Profile = %v, se esperaba [%d]", got, pref)
+		}
+		// La preferencia ya sale en la ficha, así que no se repite; los resultados se
+		// vuelven a cortar a Limit (3) con lo que queda.
+		if find(res.Results, pref) >= 0 {
+			t.Errorf("Results = %v repite #%d, que ya está en la ficha", idsOf(res.Results), pref)
+		}
+		for _, id := range []int64{r1, r2} {
+			if find(res.Results, id) < 0 {
+				t.Errorf("Results = %v debería contener #%d", idsOf(res.Results), id)
+			}
+		}
+		if want := 3; !textOnly && len(res.Results) != want {
+			t.Errorf("Results = %v, se esperaban %d tras quitar lo de la ficha", idsOf(res.Results), want)
+		}
+		if !textOnly && find(res.Results, other) < 0 {
+			t.Errorf("Results = %v debería completarse con #%d", idsOf(res.Results), other)
+		}
+		if out := res.Format(svc.MaxBytes()); !strings.Contains(out, "Tema: entrenamiento (detectado)") {
+			t.Errorf("Format debería mostrar el tema detectado:\n%s", out)
+		}
+	}
+	run("votación: los resultados 1 y 2 comparten tema", func(t *testing.T, e *env) {
+		checkVote(t, e.service(e.emb, Options{TopicDetectThreshold: highThreshold}), e, false)
+	})
+	run("votación sin embeddings (TextOnly)", func(t *testing.T, e *env) {
+		checkVote(t, e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold}), e, true)
+	})
+
+	run("votación: sin tema compartido no se detecta ninguno", func(t *testing.T, e *env) {
+		e.save(t, memory.Item{Title: "Pesas", Content: "Ejercicio de kettlebell pesado",
+			Kind: memory.KindNote, Topics: []string{"entrenamiento"}})
+		e.save(t, memory.Item{Title: "Taller", Content: "Revisión con kettlebell pesado en el taller",
+			Kind: memory.KindNote, Topics: []string{"coche"}})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
+		res := e.recall(t, svc, Request{Query: "kettlebell pesado"})
+		if res.Topic != nil || res.TopicDetected || res.TopicVia != "" {
+			t.Errorf("Topic = %+v, TopicDetected = %v, TopicVia = %q; no debía detectarse ninguno",
+				res.Topic, res.TopicDetected, res.TopicVia)
+		}
+		if len(res.Results) != 2 {
+			t.Errorf("Results = %v, se esperaban 2 resultados", idsOf(res.Results))
+		}
+	})
+
+	run("votación: gana el tema presente en más resultados", func(t *testing.T, e *env) {
+		both := []string{"zeta", "alfa"} // zeta se crea primero: id menor
+		e.save(t, memory.Item{Title: "Uno", Content: "Primera nota de kettlebell pesado", Kind: memory.KindNote, Topics: both})
+		e.save(t, memory.Item{Title: "Dos", Content: "Segunda nota de kettlebell pesado", Kind: memory.KindNote, Topics: both})
+		e.save(t, memory.Item{Title: "Tres", Content: "Tercera nota de kettlebell pesado", Kind: memory.KindNote, Topics: []string{"alfa"}})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
+		res := e.recall(t, svc, Request{Query: "kettlebell pesado"})
+		if res.Topic == nil || res.Topic.Slug != "alfa" || res.TopicVia != TopicViaVote {
+			t.Errorf("Topic = %+v, TopicVia = %q; se esperaba alfa (en 3 de los resultados) por votación", res.Topic, res.TopicVia)
+		}
+	})
+
+	run("votación: en empate gana el tema de menor id", func(t *testing.T, e *env) {
+		both := []string{"zeta", "alfa"} // zeta se crea primero: id menor, aunque alfa vaya antes por orden alfabético
+		e.save(t, memory.Item{Title: "Uno", Content: "Primera nota de kettlebell pesado", Kind: memory.KindNote, Topics: both})
+		e.save(t, memory.Item{Title: "Dos", Content: "Segunda nota de kettlebell pesado", Kind: memory.KindNote, Topics: both})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
+		res := e.recall(t, svc, Request{Query: "kettlebell pesado"})
+		if res.Topic == nil || res.Topic.Slug != "zeta" || res.TopicVia != TopicViaVote {
+			t.Errorf("Topic = %+v, TopicVia = %q; se esperaba zeta (menor id) por votación", res.Topic, res.TopicVia)
 		}
 	})
 
@@ -333,7 +439,7 @@ func TestRecall(t *testing.T) {
 				Kind:    memory.KindNote, Topics: []string{"coche"},
 			})
 		}
-		svc := e.service(e.emb, Options{TopicThreshold: highThreshold})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
 		res := e.recall(t, svc, Request{Query: "1234-KLM"})
 		pos := find(res.Results, target)
 		if pos < 0 || pos > 2 {
@@ -351,7 +457,7 @@ func TestRecall(t *testing.T) {
 		cur := e.save(t, note("Plan de compra", "Plan nuevo de compra semanal", "compra"))
 		bad := e.save(t, note("Plan descartado", "Plan descartado de compra mensual", ""))
 		e.invalidate(t, bad)
-		svc := e.service(e.emb, Options{TopicThreshold: highThreshold})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold})
 
 		// Sin historial solo sale el vigente.
 		res := e.recall(t, svc, Request{Query: "plan compra"})
@@ -391,7 +497,7 @@ func TestRecall(t *testing.T) {
 		e.save(t, memory.Item{Title: "Otra nota", Content: "Nada que ver con lo anterior",
 			Kind: memory.KindNote, Topics: []string{"coche"}})
 
-		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicThreshold: lowThreshold})
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
 		res := e.recall(t, svc, Request{Query: "1234-KLM"})
 		if !res.TextOnly {
 			t.Fatal("TextOnly debería estar activo")
@@ -408,7 +514,7 @@ func TestRecall(t *testing.T) {
 	})
 
 	run("un error del embedder distinto de ErrUnavailable se devuelve", func(t *testing.T, e *env) {
-		svc := e.service(failingEmbedder{unavailableEmbedder{dims: testDims}}, Options{TopicThreshold: lowThreshold})
+		svc := e.service(failingEmbedder{unavailableEmbedder{dims: testDims}}, Options{TopicDetectThreshold: lowThreshold})
 		_, err := svc.Recall(e.ctx, Request{Query: "algo"})
 		wantErr(t, err, "fallo de prueba")
 		if errors.Is(err, embedding.ErrUnavailable) {
@@ -419,7 +525,7 @@ func TestRecall(t *testing.T) {
 	run("caché: una consulta repetida no vuelve a calcular el embedding", func(t *testing.T, e *env) {
 		e.save(t, memory.Item{Title: "Saludo", Content: "Hola mundo desde las pruebas", Kind: memory.KindNote})
 		emb := &countingEmbedder{FakeEmbedder: e.emb}
-		svc := e.service(emb, Options{TopicThreshold: highThreshold})
+		svc := e.service(emb, Options{TopicDetectThreshold: highThreshold})
 
 		e.recall(t, svc, Request{Query: "Hola Mundo"})
 		if n := emb.queries.Load(); n != 1 {
@@ -438,7 +544,7 @@ func TestRecall(t *testing.T) {
 
 	run("caché: con CacheSize 1 se expulsa la consulta más antigua", func(t *testing.T, e *env) {
 		emb := &countingEmbedder{FakeEmbedder: e.emb}
-		svc := e.service(emb, Options{TopicThreshold: highThreshold, CacheSize: 1})
+		svc := e.service(emb, Options{TopicDetectThreshold: highThreshold, CacheSize: 1})
 		e.recall(t, svc, Request{Query: "uno"})
 		e.recall(t, svc, Request{Query: "dos"})
 		e.recall(t, svc, Request{Query: "uno"})
@@ -448,7 +554,7 @@ func TestRecall(t *testing.T) {
 	})
 
 	run("sin datos devuelve un resultado vacío", func(t *testing.T, e *env) {
-		svc := e.service(e.emb, Options{TopicThreshold: lowThreshold})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: lowThreshold})
 		res := e.recall(t, svc, Request{Query: "nada de nada"})
 		if len(res.all()) != 0 || res.Topic != nil {
 			t.Errorf("se esperaba un resultado vacío: %+v", res)
@@ -462,7 +568,7 @@ func TestRecall(t *testing.T) {
 		for i := 0; i < 6; i++ {
 			e.save(t, memory.Item{Title: fmt.Sprintf("Nota %d", i), Content: fmt.Sprintf("contenido numero%d", i), Kind: memory.KindNote})
 		}
-		svc := e.service(e.emb, Options{TopicThreshold: highThreshold, MaxLimit: 4})
+		svc := e.service(e.emb, Options{TopicDetectThreshold: highThreshold, MaxLimit: 4})
 		if n := len(e.recall(t, svc, Request{Query: "contenido", Limit: 2}).Results); n != 2 {
 			t.Errorf("con Limit 2 hubo %d resultados", n)
 		}

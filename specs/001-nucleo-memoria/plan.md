@@ -77,9 +77,10 @@ Cómo se aplica la skill:
 | `recall_max_bytes` | 6000 |
 | `session_idle_minutes` | 30 |
 | `dup_similarity` | 0,92 |
-| `topic_similarity` | 0,85 |
+| `topic_similarity` | 0,72 (dos nombres de tema son equivalentes) |
+| `topic_detect_similarity` | 0,40 (una consulta se detecta como de un tema) |
 
-- Los umbrales de similitud son valores iniciales. Se calibran con el modelo real y se documentan en `benchmark.md`.
+- Los umbrales de similitud se calibraron con el modelo real: los datos, el resumen y el motivo de cada valor están en [calibracion.md](calibracion.md).
 
 ## Clúster PostgreSQL local (paquete `database`)
 
@@ -199,7 +200,9 @@ Detalles de funcionamiento:
 ## Algoritmo de recuperación (`recall`)
 
 1. Embedding de la consulta con prefijo de consulta. Si Ollama falla, se busca solo por texto y se indica en la respuesta.
-2. **Tema:** si la IA pasa `topics`, se usan. Si no, se toma el tema cuya similitud entre su embedding y el de la consulta sea mayor, si pasa de `topic_similarity`. Los temas se comparan en memoria contra la caché.
+2. **Tema:** si la IA pasa `topics`, se usan. Si no, se detecta en dos vías (ver [calibracion.md](calibracion.md)):
+   - **similitud:** se toma el tema cuyo embedding se parece más al de la consulta, si el coseno es ≥ `topic_detect_similarity`; los temas se comparan en memoria contra la caché;
+   - **votación,** si la anterior falla o no hay embedding: tras la fusión (paso 5), si el primer resultado y al menos otro de los 5 primeros comparten un tema, se usa ese (el que aparezca en más de los 5; en empate, el de menor id). La ficha del tema se lee entonces después de la fusión y se quitan de los resultados los registros que ya salen en ella.
 3. **Candidatos semánticos:**
 
    ```sql

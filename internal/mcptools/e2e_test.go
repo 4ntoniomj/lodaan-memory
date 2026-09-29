@@ -39,7 +39,7 @@ func newStack(tc *database.TestCluster) (Deps, *Server) {
 	d := Deps{
 		Pool:     tc.Pool,
 		Memory:   memory.NewService(tc.Pool, emb, topics, sessions, cfg.DupSimilarity, time.Duration(cfg.EmbedTimeoutMs)*time.Millisecond),
-		Recall:   recall.NewService(tc.Pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicThreshold: cfg.TopicSimilarity}),
+		Recall:   recall.NewService(tc.Pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicDetectThreshold: cfg.TopicDetectSimilarity}),
 		Sessions: sessions,
 		Topics:   topics,
 		Embedder: emb,

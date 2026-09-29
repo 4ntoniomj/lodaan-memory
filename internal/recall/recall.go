@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,8 @@ const (
 	eventsLimit  = 5
 	// rrfK is the constant of Reciprocal Rank Fusion.
 	rrfK = 60
+	// voteSize is how many of the best fused results take part in the topic vote.
+	voteSize = 5
 	// topicBonus is added to the score of the records that belong to the topic.
 	topicBonus = 0.01
 	// snippetRunes is the approximate length of the fragment shown per record.
@@ -51,6 +54,16 @@ const (
 	defaultCacheSize    = 256
 )
 
+// Values of Result.TopicVia: how the topic of an answer was chosen.
+const (
+	// TopicViaRequested: the caller asked for the topic.
+	TopicViaRequested = "pedido"
+	// TopicViaSimilarity: the query embedding is close enough to the topic.
+	TopicViaSimilarity = "similitud"
+	// TopicViaVote: the best results of the query share the topic.
+	TopicViaVote = "votación"
+)
+
 // Options configures a Service. Zero values take the defaults noted per field.
 type Options struct {
 	// MaxBytes is the byte cap of the formatted answer (default 6000).
@@ -62,11 +75,11 @@ type Options struct {
 	DefaultLimit int
 	// MaxLimit is the highest number of results a request may ask for (default 20).
 	MaxLimit int
-	// TopicThreshold is the minimum cosine similarity between the query and a
-	// topic to detect it. It is required (it comes from the configuration) and
-	// is applied on top of the threshold of the topic.Resolver, which should
-	// have been built with the same value.
-	TopicThreshold float64
+	// TopicDetectThreshold is the minimum cosine similarity between the query and
+	// a topic to detect that topic by similarity. It is required (it comes from
+	// the configuration, topic_detect_similarity). It is independent of the
+	// equivalence threshold of the topic.Resolver, which is not used here.
+	TopicDetectThreshold float64
 	// CacheSize is the number of query embeddings kept in memory (default 256).
 	CacheSize int
 }
@@ -127,8 +140,11 @@ type Result struct {
 	Query string
 	// Topic is the requested or detected topic; nil if there is none.
 	Topic *topic.Topic
-	// TopicDetected is true when Topic was inferred from the query.
+	// TopicDetected is true when Topic was inferred from the query (by similarity or by vote).
 	TopicDetected bool
+	// TopicVia is how Topic was chosen: TopicViaRequested, TopicViaSimilarity or
+	// TopicViaVote. It is empty when there is no topic.
+	TopicVia string
 	// Profile holds the stable records of the topic (facts, preferences, decisions).
 	Profile []Item
 	// Events holds the latest events of the topic, most recent first.
@@ -183,6 +199,13 @@ func (s *Service) clampLimit(limit int) int {
 // search and, when the topic is already known, with its sheet. If the
 // embedding service is unavailable the search continues with text only and
 // Result.TextOnly is set; any other embedding error is returned.
+//
+// When the caller does not ask for a topic, it is detected in two ways. First
+// by similarity: the topic closest to the query embedding, if its cosine
+// reaches Options.TopicDetectThreshold. If that fails (or there is no
+// embedding), by vote once the results are fused: if the best result and at
+// least another of the best voteSize share a topic, that topic is used and its
+// sheet is read after the fusion.
 func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
@@ -198,10 +221,14 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
+	via := ""
+	if tp != nil {
+		via = TopicViaRequested
+	}
+
 	var (
 		vec      []float32
 		textOnly bool
-		detected bool
 		semantic []memory.Neighbor
 		textIDs  []int64
 		profile  []Item
@@ -261,8 +288,11 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 			if err := gctx.Err(); err != nil {
 				return err
 			}
-			if t, sim, ok := s.topics.Detect(gctx, vec); ok && sim >= s.opts.TopicThreshold {
-				tp, detected = &t, true
+			// The ok of Detect applies the equivalence threshold of the resolver, so
+			// only the returned cosine is used. A zero ID means the cache holds no
+			// topic with an embedding.
+			if t, sim, _ := s.topics.Detect(gctx, vec); t.ID != 0 && sim >= s.opts.TopicDetectThreshold {
+				tp, via = &t, TopicViaSimilarity
 				g.Go(func() error {
 					p, e, err := s.topicCard(gctx, t.ID)
 					if err != nil {
@@ -287,12 +317,12 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	}
 
 	res := Result{
-		Query:         query,
-		Topic:         tp,
-		TopicDetected: detected,
-		Profile:       profile,
-		Events:        events,
-		TextOnly:      textOnly,
+		Query:    query,
+		Topic:    tp,
+		TopicVia: via,
+		Profile:  profile,
+		Events:   events,
+		TextOnly: textOnly,
 	}
 
 	// Fusión: los registros de la ficha no se repiten en los resultados.
@@ -303,10 +333,38 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	for _, it := range events {
 		shown[it.ID] = true
 	}
-	ids, err := s.fuse(ctx, tp, semantic, textIDs, shown, limit)
+	ids, err := s.fuse(ctx, tp, semantic, textIDs, shown)
 	if err != nil {
 		return Result{}, err
 	}
+
+	// Sin tema todavía: votación entre los mejores resultados. La ficha se lee ahora,
+	// tras la fusión, así que se quitan de los resultados los registros que ya muestra.
+	if tp == nil {
+		voted, ok, err := s.voteTopic(ctx, ids)
+		if err != nil {
+			return Result{}, err
+		}
+		if ok {
+			p, e, err := s.topicCard(ctx, voted.ID)
+			if err != nil {
+				return Result{}, err
+			}
+			res.Topic, res.TopicVia, res.Profile, res.Events = &voted, TopicViaVote, p, e
+			for _, it := range p {
+				shown[it.ID] = true
+			}
+			for _, it := range e {
+				shown[it.ID] = true
+			}
+			ids = slices.DeleteFunc(ids, func(id int64) bool { return shown[id] })
+		}
+	}
+	res.TopicDetected = res.Topic != nil && res.TopicVia != TopicViaRequested
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+
 	if req.IncludeHistory {
 		ids, err = s.addHistory(ctx, ids, shown, limit*2)
 		if err != nil {
@@ -436,10 +494,72 @@ func (s *Service) topicItems(ctx context.Context, topicID int32, sql string, lim
 	return scanItems(rows)
 }
 
+// voteTopic picks a topic from the best results. It looks at the first voteSize
+// ids of ranked (best first) and their topics, in a single query. If the first
+// one and at least another share a topic, that topic wins; among several, the
+// one present in most of those results, and on a tie the lowest id. ok is
+// false when there is no such topic.
+func (s *Service) voteTopic(ctx context.Context, ranked []int64) (topic.Topic, bool, error) {
+	if len(ranked) > voteSize {
+		ranked = ranked[:voteSize]
+	}
+	if len(ranked) < 2 {
+		return topic.Topic{}, false, nil
+	}
+	first := ranked[0]
+
+	rows, err := s.pool.Query(ctx, `SELECT mt.memory_id, t.id, t.slug
+		FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id
+		WHERE mt.memory_id = ANY($1)`, ranked)
+	if err != nil {
+		return topic.Topic{}, false, fmt.Errorf("no se pudieron leer los temas de los mejores resultados: %w", err)
+	}
+	defer rows.Close()
+
+	// count: how many of the top results belong to each topic; slug: the slug of
+	// each topic seen; ofFirst: the topics of the best result.
+	count := make(map[int32]int)
+	slug := make(map[int32]string)
+	ofFirst := make(map[int32]bool)
+	for rows.Next() {
+		var memoryID int64
+		var topicID int32
+		var name string
+		if err := rows.Scan(&memoryID, &topicID, &name); err != nil {
+			return topic.Topic{}, false, fmt.Errorf("no se pudo leer el tema de un resultado: %w", err)
+		}
+		count[topicID]++
+		slug[topicID] = name
+		if memoryID == first {
+			ofFirst[topicID] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return topic.Topic{}, false, fmt.Errorf("no se pudieron leer los temas de los mejores resultados: %w", err)
+	}
+
+	var bestID int32
+	bestCount := 0
+	for id := range ofFirst {
+		n := count[id]
+		if n < 2 { // only the first result has it: nothing is shared
+			continue
+		}
+		if n > bestCount || (n == bestCount && id < bestID) {
+			bestID, bestCount = id, n
+		}
+	}
+	if bestCount == 0 {
+		return topic.Topic{}, false, nil
+	}
+	return topic.Topic{ID: bestID, Slug: slug[bestID]}, true, nil
+}
+
 // fuse merges the semantic and text candidates with Reciprocal Rank Fusion
-// (score = sum of 1/(k+rank), rank starting at 1), adds the topic bonus, drops
-// the ids in exclude and returns at most limit ids, best first.
-func (s *Service) fuse(ctx context.Context, tp *topic.Topic, semantic []memory.Neighbor, textIDs []int64, exclude map[int64]bool, limit int) ([]int64, error) {
+// (score = sum of 1/(k+rank), rank starting at 1), adds the topic bonus if tp is
+// set, drops the ids in exclude and returns every remaining id, best first. The
+// caller cuts the list to the limit, because it may still remove more ids.
+func (s *Service) fuse(ctx context.Context, tp *topic.Topic, semantic []memory.Neighbor, textIDs []int64, exclude map[int64]bool) ([]int64, error) {
 	score := make(map[int64]float64, len(semantic)+len(textIDs))
 	for i, n := range semantic {
 		score[n.ID] += 1 / float64(rrfK+i+1)
@@ -485,9 +605,6 @@ func (s *Service) fuse(ctx context.Context, tp *topic.Topic, semantic []memory.N
 		}
 		return ids[i] > ids[j]
 	})
-	if len(ids) > limit {
-		ids = ids[:limit]
-	}
 	return ids, nil
 }
 

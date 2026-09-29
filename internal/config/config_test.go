@@ -13,7 +13,7 @@ func isolate(t *testing.T) string {
 		"LODAN_PG_PORT", "LODAN_PG_BIN_DIR", "LODAN_OLLAMA_URL", "LODAN_EMBED_MODEL",
 		"LODAN_EMBED_DIMS", "LODAN_EMBED_KEEP_ALIVE", "LODAN_EMBED_TIMEOUT_MS", "LODAN_HTTP_ADDR",
 		"LODAN_RECALL_MAX_BYTES", "LODAN_SESSION_IDLE_MINUTES",
-		"LODAN_DUP_SIMILARITY", "LODAN_TOPIC_SIMILARITY",
+		"LODAN_DUP_SIMILARITY", "LODAN_TOPIC_SIMILARITY", "LODAN_TOPIC_DETECT_SIMILARITY",
 	} {
 		t.Setenv(name, "")
 	}
@@ -25,17 +25,18 @@ func isolate(t *testing.T) string {
 func TestDefault(t *testing.T) {
 	c := Default()
 	want := Config{
-		PGPort:             54329,
-		OllamaURL:          "http://127.0.0.1:11434",
-		EmbedModel:         "embeddinggemma",
-		EmbedDims:          768,
-		EmbedKeepAlive:     "-1",
-		EmbedTimeoutMs:     2000,
-		HTTPAddr:           "127.0.0.1:7438",
-		RecallMaxBytes:     6000,
-		SessionIdleMinutes: 30,
-		DupSimilarity:      0.92,
-		TopicSimilarity:    0.85,
+		PGPort:                54329,
+		OllamaURL:             "http://127.0.0.1:11434",
+		EmbedModel:            "embeddinggemma",
+		EmbedDims:             768,
+		EmbedKeepAlive:        "-1",
+		EmbedTimeoutMs:        2000,
+		HTTPAddr:              "127.0.0.1:7438",
+		RecallMaxBytes:        6000,
+		SessionIdleMinutes:    30,
+		DupSimilarity:         0.92,
+		TopicSimilarity:       0.72,
+		TopicDetectSimilarity: 0.40,
 	}
 	if c != want {
 		t.Fatalf("Default() = %+v, se esperaba %+v", c, want)
@@ -126,6 +127,40 @@ func TestEmbedTimeoutMs(t *testing.T) {
 	}
 }
 
+func TestTopicDetectSimilarity(t *testing.T) {
+	dir := isolate(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TopicDetectSimilarity != 0.40 {
+		t.Errorf("TopicDetectSimilarity = %v, se esperaba el defecto 0.40", c.TopicDetectSimilarity)
+	}
+	if c.TopicDetectSimilarity >= c.TopicSimilarity {
+		t.Errorf("el umbral de detección (%v) debería ser menor que el de equivalencia (%v)",
+			c.TopicDetectSimilarity, c.TopicSimilarity)
+	}
+
+	if err := os.WriteFile(dir+"/config.json", []byte(`{"topic_detect_similarity": 0.3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = Load(); err != nil || c.TopicDetectSimilarity != 0.3 {
+		t.Fatalf("con JSON: TopicDetectSimilarity = %v, %v; se esperaba 0.3", c.TopicDetectSimilarity, err)
+	}
+
+	t.Setenv("LODAN_TOPIC_DETECT_SIMILARITY", "0.5")
+	if c, err = Load(); err != nil || c.TopicDetectSimilarity != 0.5 {
+		t.Fatalf("con entorno: TopicDetectSimilarity = %v, %v; se esperaba 0.5", c.TopicDetectSimilarity, err)
+	}
+
+	for _, v := range []string{"0", "1.5", "-0.1"} {
+		t.Setenv("LODAN_TOPIC_DETECT_SIMILARITY", v)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "topic_detect_similarity") {
+			t.Errorf("el valor %q debía rechazarse nombrando topic_detect_similarity, error: %v", v, err)
+		}
+	}
+}
+
 func TestLoadEntornoMalFormado(t *testing.T) {
 	casos := []struct{ name, value string }{
 		{"LODAN_PG_PORT", "abc"},
@@ -135,6 +170,7 @@ func TestLoadEntornoMalFormado(t *testing.T) {
 		{"LODAN_SESSION_IDLE_MINUTES", "x"},
 		{"LODAN_DUP_SIMILARITY", "alta"},
 		{"LODAN_TOPIC_SIMILARITY", "0,85"},
+		{"LODAN_TOPIC_DETECT_SIMILARITY", "media"},
 	}
 	for _, tc := range casos {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +211,8 @@ func TestValidate(t *testing.T) {
 		"topic mayor que 1":  func(c *Config) { c.TopicSimilarity = 1.1 },
 		"recall bytes bajo":  func(c *Config) { c.RecallMaxBytes = 499 },
 		"sesión sin minutos": func(c *Config) { c.SessionIdleMinutes = 0 },
+		"detect cero":        func(c *Config) { c.TopicDetectSimilarity = 0 },
+		"detect mayor que 1": func(c *Config) { c.TopicDetectSimilarity = 1.1 },
 	}
 	for name, mutar := range novalidas {
 		t.Run(name, func(t *testing.T) {

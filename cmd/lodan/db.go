@@ -71,7 +71,7 @@ func openStack(ctx context.Context, cfg config.Config, logger *log.Logger) (mcpt
 	deps := mcptools.Deps{
 		Pool:     pool,
 		Memory:   memory.NewService(pool, emb, topics, sessions, cfg.DupSimilarity, time.Duration(cfg.EmbedTimeoutMs)*time.Millisecond),
-		Recall:   recall.NewService(pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicThreshold: cfg.TopicSimilarity}),
+		Recall:   recall.NewService(pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicDetectThreshold: cfg.TopicDetectSimilarity}),
 		Sessions: sessions,
 		Topics:   topics,
 		Embedder: emb,

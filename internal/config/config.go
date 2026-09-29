@@ -15,36 +15,38 @@ import (
 
 // Config is the full lodan configuration.
 type Config struct {
-	DataDir            string  `json:"-"` // never persisted: comes from LODAN_DATA_DIR or the OS default
-	PGPort             int     `json:"pg_port"`
-	PGBinDir           string  `json:"pg_bin_dir"`
-	OllamaURL          string  `json:"ollama_url"`
-	EmbedModel         string  `json:"embed_model"`
-	EmbedDims          int     `json:"embed_dims"`
-	EmbedKeepAlive     string  `json:"embed_keep_alive"`
-	EmbedTimeoutMs     int     `json:"embed_timeout_ms"` // max wait for the embedding when saving
-	HTTPAddr           string  `json:"http_addr"`
-	RecallMaxBytes     int     `json:"recall_max_bytes"`
-	SessionIdleMinutes int     `json:"session_idle_minutes"`
-	DupSimilarity      float64 `json:"dup_similarity"`
-	TopicSimilarity    float64 `json:"topic_similarity"`
+	DataDir               string  `json:"-"` // never persisted: comes from LODAN_DATA_DIR or the OS default
+	PGPort                int     `json:"pg_port"`
+	PGBinDir              string  `json:"pg_bin_dir"`
+	OllamaURL             string  `json:"ollama_url"`
+	EmbedModel            string  `json:"embed_model"`
+	EmbedDims             int     `json:"embed_dims"`
+	EmbedKeepAlive        string  `json:"embed_keep_alive"`
+	EmbedTimeoutMs        int     `json:"embed_timeout_ms"` // max wait for the embedding when saving
+	HTTPAddr              string  `json:"http_addr"`
+	RecallMaxBytes        int     `json:"recall_max_bytes"`
+	SessionIdleMinutes    int     `json:"session_idle_minutes"`
+	DupSimilarity         float64 `json:"dup_similarity"`
+	TopicSimilarity       float64 `json:"topic_similarity"`        // two topic names are equivalent
+	TopicDetectSimilarity float64 `json:"topic_detect_similarity"` // a query is detected as belonging to a topic
 }
 
 // Default returns the configuration with built-in defaults.
 // DataDir and PGBinDir are left empty.
 func Default() Config {
 	return Config{
-		PGPort:             54329,
-		OllamaURL:          "http://127.0.0.1:11434",
-		EmbedModel:         "embeddinggemma",
-		EmbedDims:          768,
-		EmbedKeepAlive:     "-1",
-		EmbedTimeoutMs:     2000,
-		HTTPAddr:           "127.0.0.1:7438",
-		RecallMaxBytes:     6000,
-		SessionIdleMinutes: 30,
-		DupSimilarity:      0.92,
-		TopicSimilarity:    0.85,
+		PGPort:                54329,
+		OllamaURL:             "http://127.0.0.1:11434",
+		EmbedModel:            "embeddinggemma",
+		EmbedDims:             768,
+		EmbedKeepAlive:        "-1",
+		EmbedTimeoutMs:        2000,
+		HTTPAddr:              "127.0.0.1:7438",
+		RecallMaxBytes:        6000,
+		SessionIdleMinutes:    30,
+		DupSimilarity:         0.92,
+		TopicSimilarity:       0.72, // calibrated with the reference model, see specs/001-nucleo-memoria/calibracion.md
+		TopicDetectSimilarity: 0.40,
 	}
 }
 
@@ -131,6 +133,7 @@ func applyEnv(cfg *Config) error {
 	}{
 		{"LODAN_DUP_SIMILARITY", &cfg.DupSimilarity},
 		{"LODAN_TOPIC_SIMILARITY", &cfg.TopicSimilarity},
+		{"LODAN_TOPIC_DETECT_SIMILARITY", &cfg.TopicDetectSimilarity},
 	}
 	for _, f := range floats {
 		v := os.Getenv(f.name)
@@ -162,6 +165,9 @@ func (c Config) Validate() error {
 	}
 	if !(c.TopicSimilarity > 0 && c.TopicSimilarity <= 1) {
 		return fmt.Errorf("topic_similarity debe estar en (0,1], y es %v", c.TopicSimilarity)
+	}
+	if !(c.TopicDetectSimilarity > 0 && c.TopicDetectSimilarity <= 1) {
+		return fmt.Errorf("topic_detect_similarity debe estar en (0,1], y es %v", c.TopicDetectSimilarity)
 	}
 	if c.RecallMaxBytes < 500 {
 		return fmt.Errorf("recall_max_bytes debe ser al menos 500, y es %d", c.RecallMaxBytes)
