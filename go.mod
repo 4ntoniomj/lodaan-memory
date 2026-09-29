@@ -6,6 +6,7 @@ toolchain go1.27.1
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pgvector/pgvector-go v0.4.1
 )
 
