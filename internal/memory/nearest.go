@@ -19,6 +19,47 @@ const (
 	maxEfSearch = 1000
 )
 
+// EfSearch returns the hnsw.ef_search that Nearest sets for a lookup of the given
+// number of candidates: the candidates themselves, but at least 40 and at most 1000
+// (the highest value pgvector accepts).
+func EfSearch(candidates int) int {
+	return min(max(candidates, minEfSearch), maxEfSearch)
+}
+
+// CandidatesSQL returns the statement of the first step of Nearest: it looks up
+// candidate ids in the binary-quantized HNSW index (Hamming distance).
+//
+// Parameters: $1 is the query vector (halfvec) and $2 the number of candidates.
+// dims is the dimension of the embeddings column and must be a positive integer:
+// it is written into the SQL text, not bound as a parameter.
+//
+// This is the single source of truth of the query: `lodan bench` measures exactly
+// this text, so any change here must be validated with `lodan bench`.
+func CandidatesSQL(dims int) string {
+	d := strconv.Itoa(dims)
+	return `SELECT id FROM memories
+		WHERE status = 'active' AND embedding IS NOT NULL
+		ORDER BY binary_quantize(embedding)::bit(` + d + `) <~> binary_quantize($1::halfvec(` + d + `))::bit(` + d + `)
+		LIMIT $2`
+}
+
+// RerankSQL returns the statement of the second step of Nearest: it reorders the
+// candidates with the full-precision vectors and returns (id, title, similarity).
+//
+// Parameters: $1 the candidate ids (bigint[]), $2 the query vector (halfvec), $3
+// the ids to leave out (bigint[], never NULL) and $4 the maximum number of rows.
+// dims has the same meaning as in CandidatesSQL.
+//
+// Like CandidatesSQL it is measured by `lodan bench`: validate any change with it.
+func RerankSQL(dims int) string {
+	d := strconv.Itoa(dims)
+	return `SELECT id, title, 1 - (embedding <=> $2::halfvec(` + d + `)) AS sim
+		FROM memories
+		WHERE id = ANY($1) AND NOT (id = ANY($3)) AND embedding IS NOT NULL
+		ORDER BY embedding <=> $2::halfvec(` + d + `)
+		LIMIT $4`
+}
+
 // Nearest returns up to limit active records whose embedding has a cosine
 // similarity of at least minSim to vec, most similar first, leaving out excludeIDs.
 //
@@ -64,19 +105,15 @@ func Nearest(ctx context.Context, q database.Querier, vec []float32, dims, candi
 
 // nearestIn runs the two-step search inside a transaction.
 func nearestIn(ctx context.Context, tx database.Querier, vec []float32, dims, candidates, limit int, minSim float64, excludeIDs []int64) ([]Neighbor, error) {
-	ef := min(max(candidates, minEfSearch), maxEfSearch)
+	ef := EfSearch(candidates)
 	// set_config(..., true) equals SET LOCAL but accepts parameters.
 	if _, err := tx.Exec(ctx, `SELECT set_config('hnsw.ef_search', $1, true)`, strconv.Itoa(ef)); err != nil {
 		return nil, fmt.Errorf("no se pudo ajustar hnsw.ef_search: %w", err)
 	}
 
-	d := strconv.Itoa(dims) // entero de confianza: no es un parámetro
 	param := pgvector.NewHalfVector(vec)
 
-	rows, err := tx.Query(ctx, `SELECT id FROM memories
-		WHERE status = 'active' AND embedding IS NOT NULL
-		ORDER BY binary_quantize(embedding)::bit(`+d+`) <~> binary_quantize($1::halfvec(`+d+`))::bit(`+d+`)
-		LIMIT $2`, param, candidates)
+	rows, err := tx.Query(ctx, CandidatesSQL(dims), param, candidates)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudieron buscar los candidatos semánticos: %w", err)
 	}
@@ -100,11 +137,7 @@ func nearestIn(ctx context.Context, tx database.Querier, vec []float32, dims, ca
 	if excludeIDs == nil {
 		excludeIDs = []int64{} // un NULL en NOT (id = ANY(NULL)) descartaría todas las filas
 	}
-	rows, err = tx.Query(ctx, `SELECT id, title, 1 - (embedding <=> $2::halfvec(`+d+`)) AS sim
-		FROM memories
-		WHERE id = ANY($1) AND NOT (id = ANY($3)) AND embedding IS NOT NULL
-		ORDER BY embedding <=> $2::halfvec(`+d+`)
-		LIMIT $4`, ids, param, excludeIDs, limit)
+	rows, err = tx.Query(ctx, RerankSQL(dims), ids, param, excludeIDs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudieron reordenar los candidatos: %w", err)
 	}

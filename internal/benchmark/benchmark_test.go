@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"lodan/internal/database"
+	"lodan/internal/memory"
+	"lodan/internal/recall"
 )
 
 // fixedNow is the reference instant of the generator in tests, so they do not depend on the clock.
@@ -191,20 +193,54 @@ func TestOpcionesPorDefecto(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(o.Rows, []int{10_000, 100_000, 1_000_000}) || o.Queries != 500 || o.TruthQueries != 100 ||
-		o.Clusters != 2000 || o.Topics != 1000 || o.Out != DefaultOut || o.Log == nil {
+		o.Clusters != 2000 || o.Topics != 1000 || o.Out != DefaultOut || o.Log == nil ||
+		!slices.Equal(o.Candidates, []int{100}) || o.Reuse {
 		t.Errorf("valores por defecto inesperados: %+v", o)
 	}
 
-	o, err = Options{Rows: []int{1000, 500, 1000}, EmbedQueries: -1}.withDefaults()
+	o, err = Options{Rows: []int{1000, 500, 1000}, Candidates: []int{50, 20, 50}, EmbedQueries: -1}.withDefaults()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(o.Rows, []int{500, 1000}) || o.EmbedQueries != 30 {
 		t.Errorf("las filas deben quedar ordenadas y sin repetir, y EmbedQueries = 30: %+v", o)
 	}
+	if !slices.Equal(o.Candidates, []int{20, 50}) {
+		t.Errorf("los candidatos deben quedar ordenados y sin repetir: %v", o.Candidates)
+	}
 
 	if _, err := (Options{Rows: []int{0}}).withDefaults(); err == nil {
 		t.Error("0 filas debería ser un error")
+	}
+	if _, err := (Options{Candidates: []int{20, 0}}).withDefaults(); err == nil {
+		t.Error("0 candidatos debería ser un error")
+	}
+}
+
+func TestSumSamples(t *testing.T) {
+	a := []time.Duration{1, 2, 3}
+	b := []time.Duration{10, 20, 30, 40}
+	if got := sumSamples(a, b); !slices.Equal(got, []time.Duration{11, 22, 33}) {
+		t.Errorf("sumSamples = %v, se esperaba [11 22 33]", got)
+	}
+	if got := sumSamples(); got != nil {
+		t.Errorf("sumSamples() = %v, se esperaba nil", got)
+	}
+}
+
+func TestConsultasSonLasDeProduccion(t *testing.T) {
+	// El benchmark no puede tener SQL propio para Q1-Q4: debe usar exactamente el de producción.
+	s := newSearchSQL(64)
+	for name, pair := range map[string][2]string{
+		"Q1":  {s.candidates, memory.CandidatesSQL(64)},
+		"Q2":  {s.rerank, memory.RerankSQL(64)},
+		"Q3":  {s.text, recall.TextCandidatesSQL(false)},
+		"Q4a": {s.profile, recall.ProfileSQL},
+		"Q4b": {s.events, recall.EventsSQL},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s no usa el SQL de producción:\n%s\n%s", name, pair[0], pair[1])
+		}
 	}
 }
 
@@ -223,6 +259,7 @@ func TestRunPequeno(t *testing.T) {
 
 	opts := Options{
 		Rows:         []int{500, 1000},
+		Candidates:   []int{20, 50},
 		Queries:      20,
 		TruthQueries: 5,
 		EmbedQueries: 0,
@@ -247,11 +284,26 @@ func TestRunPequeno(t *testing.T) {
 		if !strings.Contains(md, "| "+strconv.Itoa(rows)+" |") {
 			t.Errorf("el markdown no contiene la fila de la escala %d:\n%s", rows, md)
 		}
-		if s.Recall < 0 || s.Recall > 1 || math.IsNaN(s.Recall) {
-			t.Errorf("recall@10 de %d filas = %v, se esperaba un valor entre 0 y 1", rows, s.Recall)
-		}
-		if s.Total.P50 <= 0 || s.HNSWBytes <= 0 || s.GINBytes <= 0 || s.TableBytes <= 0 {
+		if s.Q3.P50 <= 0 || s.Q4.P50 <= 0 || s.HNSWBytes <= 0 || s.GINBytes <= 0 || s.TableBytes <= 0 {
 			t.Errorf("mediciones vacías en la escala %d: %+v", rows, s)
+		}
+		if len(s.Candidates) != 2 || s.Candidates[0].Candidates != 20 || s.Candidates[1].Candidates != 50 {
+			t.Fatalf("escala %d: candidatos medidos = %+v, se esperaban 20 y 50", rows, s.Candidates)
+		}
+		for _, c := range s.Candidates {
+			if c.Recall < 0 || c.Recall > 1 || math.IsNaN(c.Recall) {
+				t.Errorf("recall@10 de %d filas y %d candidatos = %v, se esperaba un valor entre 0 y 1", rows, c.Candidates, c.Recall)
+			}
+			if c.Q1.P50 <= 0 || c.Q2.P50 <= 0 || c.Total.P50 <= 0 {
+				t.Errorf("mediciones vacías en la escala %d con %d candidatos: %+v", rows, c.Candidates, c)
+			}
+			if want := memory.EfSearch(c.Candidates); c.EfSearch != want {
+				t.Errorf("hnsw.ef_search = %d con %d candidatos, se esperaba %d", c.EfSearch, c.Candidates, want)
+			}
+			// Una fila por escala y número de candidatos en las tablas de recall y de latencia.
+			if want := "| " + strconv.Itoa(rows) + " | " + strconv.Itoa(c.Candidates) + " | "; strings.Count(md, want) < 3 {
+				t.Errorf("el markdown no tiene la fila «%s» en las tablas de recall, latencia p50/p95 y p99:\n%s", want, md)
+			}
 		}
 		if s.LoadTime <= 0 || s.HNSWBuild <= 0 || s.GINBuild <= 0 {
 			t.Errorf("tiempos vacíos en la escala %d: %+v", rows, s)
@@ -272,6 +324,66 @@ func TestRunPequeno(t *testing.T) {
 	}
 	if memories != 1000 || links != 1000 || topics != 10 {
 		t.Errorf("memories=%d memory_topics=%d topics=%d, se esperaba 1000/1000/10", memories, links, topics)
+	}
+
+	// Los índices parciales de la ficha (migración 0002) existen, y el antiguo ya no.
+	for name, want := range map[string]bool{
+		profileIndex: true, eventsIndex: true, "memory_topics_topic_id_kind_ts_idx": false,
+	} {
+		var exists bool
+		if err := tc.Pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != want {
+			t.Errorf("índice %s: existe = %v, se esperaba %v", name, exists, want)
+		}
+	}
+	if !strings.Contains(md, profileIndex) || !strings.Contains(md, eventsIndex) {
+		t.Errorf("el markdown no informa del uso de los índices de la ficha:\n%s", md)
+	}
+
+	// Con Reuse no se carga nada: se miden solo las 1000 filas que ya hay, y los datos siguen ahí.
+	var maxIDBefore int64
+	if err := tc.Pool.QueryRow(ctx, "SELECT max(id) FROM memories").Scan(&maxIDBefore); err != nil {
+		t.Fatal(err)
+	}
+	reuseOpts := opts
+	reuseOpts.Reuse = true
+	repReuse, err := run(ctx, tc.Pool, tc.Cfg.PGDataDir(), tc.Cfg, reuseOpts)
+	if err != nil {
+		t.Fatalf("la ejecución con Reuse falló: %v", err)
+	}
+	if !repReuse.Reused || len(repReuse.Scales) != 1 || repReuse.Scales[0].Rows != 1000 {
+		t.Fatalf("con Reuse se esperaba una sola escala de 1000 filas reutilizada: reused=%v escalas=%+v",
+			repReuse.Reused, repReuse.Scales)
+	}
+	sr := repReuse.Scales[0]
+	if sr.LoadTime != 0 || sr.HNSWBuild != 0 || sr.GINBuild != 0 {
+		t.Errorf("con Reuse los tiempos de carga e índice deben quedar vacíos: %+v", sr)
+	}
+	if len(sr.Candidates) != 2 || sr.Q3.P50 <= 0 || sr.HNSWBytes <= 0 {
+		t.Errorf("con Reuse se esperaban las mediciones de 2 candidatos: %+v", sr)
+	}
+	if !strings.Contains(repReuse.Markdown(), "datos reutilizados") {
+		t.Errorf("el markdown debería indicar «datos reutilizados»:\n%s", repReuse.Markdown())
+	}
+	var maxIDAfter int64
+	if err := tc.Pool.QueryRow(ctx, "SELECT max(id) FROM memories").Scan(&maxIDAfter); err != nil {
+		t.Fatal(err)
+	}
+	if maxIDAfter != maxIDBefore {
+		t.Errorf("Reuse no debe recargar los datos: max(id) pasó de %d a %d", maxIDBefore, maxIDAfter)
+	}
+
+	// Con Reuse y un número de filas que no coincide, error claro y sin tocar los datos.
+	badOpts := reuseOpts
+	badOpts.Rows = []int{500, 2000}
+	if _, err := run(ctx, tc.Pool, tc.Cfg.PGDataDir(), tc.Cfg, badOpts); err == nil ||
+		!strings.Contains(err.Error(), "--reuse") || !strings.Contains(err.Error(), "2000") {
+		t.Errorf("Reuse con otro número de filas debería fallar con un error claro: %v", err)
+	}
+	if err := tc.Pool.QueryRow(ctx, "SELECT count(*) FROM memories").Scan(&memories); err != nil || memories != 1000 {
+		t.Errorf("tras el error de Reuse memories = %d (error %v), se esperaban 1000 filas intactas", memories, err)
 	}
 
 	// Una segunda ejecución vacía los datos anteriores y da el mismo resultado.

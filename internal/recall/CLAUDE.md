@@ -17,6 +17,8 @@
 
 Cualquier cambio en las consultas de búsqueda se valida con el benchmark (`internal/benchmark`) antes de darse por bueno.
 
+El SQL de las consultas vive en `sql.go` (`TextCandidatesSQL`, `ProfileSQL`, `EventsSQL`) y el benchmark ejecuta exactamente esos textos, sin copias. Los predicados de `ProfileSQL` y `EventsSQL` son idénticos a los de los índices parciales de la migración 0002: si cambias uno, cambia el otro con una migración nueva (`TestFichaUsaIndicesParciales` lo comprueba).
+
 ## Pruebas
 
 `go test ./internal/recall/...`

@@ -17,6 +17,8 @@
 
 `memories` y `memory_topics` se actualizan siempre en la misma transacción, desde el código (sin triggers).
 
+`CandidatesSQL` y `RerankSQL` (`nearest.go`) son la única fuente del SQL de la búsqueda semántica: `Nearest` y `lodan bench` usan esos mismos textos. Cualquier cambio se valida con `lodan bench`.
+
 ## Pruebas
 
 `go test ./internal/memory/...`

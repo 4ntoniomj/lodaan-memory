@@ -395,13 +395,7 @@ func (s *Service) embedQuery(ctx context.Context, query string) ([]float32, erro
 // textSearch returns the ids of the records matching the query in full text,
 // best first. Non-active records are included only with history.
 func (s *Service) textSearch(ctx context.Context, query string, history bool) ([]int64, error) {
-	sql := `SELECT id FROM memories WHERE tsv @@ websearch_to_tsquery('spanish', $1::text)`
-	if !history {
-		sql += ` AND status = 'active'`
-	}
-	sql += ` ORDER BY ts_rank_cd(tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC LIMIT $2`
-
-	rows, err := s.pool.Query(ctx, sql, query, textCandidates)
+	rows, err := s.pool.Query(ctx, TextCandidatesSQL(history), query, textCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("falló la búsqueda por texto: %w", err)
 	}
@@ -422,24 +416,20 @@ func (s *Service) textSearch(ctx context.Context, query string, history bool) ([
 
 // topicCard returns the profile (stable records) and the latest events of a topic.
 func (s *Service) topicCard(ctx context.Context, topicID int32) (profile, events []Item, err error) {
-	profile, err = s.topicItems(ctx, topicID, `mt.kind IN ('fact','preference','decision')`, profileLimit)
+	profile, err = s.topicItems(ctx, topicID, ProfileSQL, profileLimit)
 	if err != nil {
 		return nil, nil, err
 	}
-	events, err = s.topicItems(ctx, topicID, `mt.kind = 'event'`, eventsLimit)
+	events, err = s.topicItems(ctx, topicID, EventsSQL, eventsLimit)
 	if err != nil {
 		return nil, nil, err
 	}
 	return profile, events, nil
 }
 
-// topicItems returns the active records of a topic that satisfy cond (a fixed
-// SQL condition over mt), most recent first.
-func (s *Service) topicItems(ctx context.Context, topicID int32, cond string, limit int) ([]Item, error) {
-	rows, err := s.pool.Query(ctx, `SELECT m.id, m.kind::text, m.status::text, m.title, m.content, m.occurred_at, 0::bigint
-		FROM memory_topics mt JOIN memories m ON m.id = mt.memory_id
-		WHERE mt.topic_id = $1 AND mt.active AND `+cond+`
-		ORDER BY mt.ts DESC, m.id DESC LIMIT $2`, topicID, limit)
+// topicItems runs sql (ProfileSQL or EventsSQL) for a topic and returns its records.
+func (s *Service) topicItems(ctx context.Context, topicID int32, sql string, limit int) ([]Item, error) {
+	rows, err := s.pool.Query(ctx, sql, topicID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo leer la ficha del tema: %w", err)
 	}

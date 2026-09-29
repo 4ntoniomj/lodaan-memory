@@ -16,8 +16,10 @@ import (
 
 // runBench implements `lodan bench` and returns the process exit code.
 func runBench(args []string, stderr io.Writer) int {
-	fs := newFlagSet("bench", "lodan bench [--rows n1,n2,...] [--queries n] [--out fichero] [--seed n]", stderr)
+	fs := newFlagSet("bench", "lodan bench [--rows n1,n2,...] [--candidates c1,c2,...] [--reuse] [--queries n] [--out fichero] [--seed n]", stderr)
 	rowsFlag := fs.String("rows", "10000,100000,1000000", "tamaños del benchmark separados por comas, p. ej. 10000,100000")
+	candidatesFlag := fs.String("candidates", "100", "candidatos del índice binario a medir, separados por comas, p. ej. 50,100,200")
+	reuse := fs.Bool("reuse", false, "reutiliza los datos de lodan_bench si ya tiene max(--rows) filas: no carga ni reconstruye índices y mide solo la última escala")
 	queries := fs.Int("queries", 500, "consultas medidas por escala")
 	out := fs.String("out", benchmark.DefaultOut, "fichero markdown de salida")
 	seed := fs.Int64("seed", 42, "semilla del generador de datos sintéticos")
@@ -30,7 +32,12 @@ func runBench(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	rows, err := parseRows(*rowsFlag)
+	rows, err := parseIntList("--rows", *rowsFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan bench: %v\n", err)
+		return 2
+	}
+	candidates, err := parseIntList("--candidates", *candidatesFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "lodan bench: %v\n", err)
 		return 2
@@ -55,6 +62,8 @@ func runBench(args []string, stderr io.Writer) int {
 
 	_, err = benchmark.Run(ctx, cfg, benchmark.Options{
 		Rows:         rows,
+		Candidates:   candidates,
+		Reuse:        *reuse,
 		Queries:      *queries,
 		EmbedQueries: *embedQueries,
 		Seed:         *seed,
@@ -68,9 +77,10 @@ func runBench(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// parseRows parses a comma-separated list of positive integers.
-func parseRows(s string) ([]int, error) {
-	var rows []int
+// parseIntList parses a comma-separated list of positive integers. flag is the name of the
+// flag, used in the error messages.
+func parseIntList(flag, s string) ([]int, error) {
+	var values []int
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -78,12 +88,12 @@ func parseRows(s string) ([]int, error) {
 		}
 		n, err := strconv.Atoi(part)
 		if err != nil || n <= 0 {
-			return nil, fmt.Errorf("--rows: %q no es un entero positivo", part)
+			return nil, fmt.Errorf("%s: %q no es un entero positivo", flag, part)
 		}
-		rows = append(rows, n)
+		values = append(values, n)
 	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("--rows: falta al menos un tamaño")
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s: falta al menos un valor", flag)
 	}
-	return rows, nil
+	return values, nil
 }

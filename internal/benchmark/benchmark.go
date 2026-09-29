@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,13 @@ type Options struct {
 	// Rows are the table sizes to measure (default 10000, 100000, 1000000). They are sorted and
 	// loaded incrementally.
 	Rows []int
+	// Candidates are the numbers of candidates of the binary index lookup (Q1) to measure at
+	// every scale (default 100). Q1, Q2 and the recall@10 are measured once for each of them.
+	Candidates []int
+	// Reuse skips truncating and loading when lodan_bench already holds exactly max(Rows) rows:
+	// the HNSW and GIN indexes are not rebuilt either, and only the last scale is measured. It is
+	// an error if the row count is different.
+	Reuse bool
 	// Queries is the number of measured repetitions per scale (default 500).
 	Queries int
 	// TruthQueries is the number of queries used for recall@10 (default 100).
@@ -75,6 +83,17 @@ func (o Options) withDefaults() (Options, error) {
 	for _, n := range o.Rows {
 		if n <= 0 {
 			return o, fmt.Errorf("el número de filas de una escala debe ser mayor que 0, y es %d", n)
+		}
+	}
+	if len(o.Candidates) == 0 {
+		o.Candidates = []int{100}
+	}
+	o.Candidates = slices.Clone(o.Candidates)
+	slices.Sort(o.Candidates)
+	o.Candidates = slices.Compact(o.Candidates)
+	for _, c := range o.Candidates {
+		if c <= 0 {
+			return o, fmt.Errorf("el número de candidatos debe ser mayor que 0, y es %d", c)
 		}
 	}
 	if o.Queries <= 0 {
@@ -178,7 +197,8 @@ func writeReport(rep Report, path string) error {
 
 // run executes the benchmark on an already migrated database behind pool. pgDataDir is the
 // data directory of the cluster, used to find its processes and measure their RAM.
-// It empties memories, topics and memory_topics first, so pool must not point at real data.
+// It empties memories, topics and memory_topics first, so pool must not point at real data;
+// with opts.Reuse it empties nothing and requires the table to hold exactly the last scale.
 // On error it returns the report built so far.
 func run(ctx context.Context, pool *pgxpool.Pool, pgDataDir string, cfg config.Config, opts Options) (Report, error) {
 	opts, err := opts.withDefaults()
@@ -216,22 +236,45 @@ func run(ctx context.Context, pool *pgxpool.Pool, pgDataDir string, cfg config.C
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM memories").Scan(&existing); err != nil {
 		return rep, fmt.Errorf("no se pudo contar memories: %w", err)
 	}
-	if existing > 0 {
-		lg.Printf("La base ya tenía %d filas: se vacía.", existing)
-	}
-	if _, err := conn.Exec(ctx, "TRUNCATE memories, topics, memory_topics RESTART IDENTITY CASCADE"); err != nil {
-		return rep, fmt.Errorf("no se pudieron vaciar las tablas: %w", err)
-	}
-	if _, err := conn.Exec(ctx, "CREATE TEMP TABLE IF NOT EXISTS bench_topic_map (memory_id bigint, topic_id int)"); err != nil {
-		return rep, fmt.Errorf("no se pudo crear la tabla temporal de temas: %w", err)
-	}
 
+	scales := opts.Rows
 	gen := newGenerator(opts.Seed, dims, opts.Clusters, opts.Topics, rep.Date)
-	topicIDs, err := loadTopics(ctx, conn, gen, opts.Topics)
-	if err != nil {
-		return rep, err
+	var topicIDs []int64
+	if opts.Reuse {
+		last := opts.Rows[len(opts.Rows)-1]
+		if existing != int64(last) {
+			return rep, fmt.Errorf("--reuse: la base %s tiene %d filas y se esperaban %d (la mayor de las escalas); "+
+				"ejecuta sin --reuse para cargar los datos", benchDatabase, existing, last)
+		}
+		rep.Reused = true
+		scales = []int{last}
+		lg.Printf("Datos reutilizados: la base ya tiene %d filas, no se carga nada ni se reconstruyen los índices.", existing)
+
+		topicIDs, err = readTopicIDs(ctx, conn, opts.Topics)
+		if err != nil {
+			return rep, err
+		}
+		for _, name := range []string{defs.hnswName, defs.ginName} {
+			if err := requireIndexes(ctx, conn, name); err != nil {
+				return rep, fmt.Errorf("--reuse: %w", err)
+			}
+		}
+	} else {
+		if existing > 0 {
+			lg.Printf("La base ya tenía %d filas: se vacía.", existing)
+		}
+		if _, err := conn.Exec(ctx, "TRUNCATE memories, topics, memory_topics RESTART IDENTITY CASCADE"); err != nil {
+			return rep, fmt.Errorf("no se pudieron vaciar las tablas: %w", err)
+		}
+		if _, err := conn.Exec(ctx, "CREATE TEMP TABLE IF NOT EXISTS bench_topic_map (memory_id bigint, topic_id int)"); err != nil {
+			return rep, fmt.Errorf("no se pudo crear la tabla temporal de temas: %w", err)
+		}
+		topicIDs, err = loadTopics(ctx, conn, gen, opts.Topics)
+		if err != nil {
+			return rep, err
+		}
+		lg.Printf("%d temas cargados", len(topicIDs))
 	}
-	lg.Printf("%d temas cargados", len(topicIDs))
 
 	sqls := newSearchSQL(dims)
 	var (
@@ -239,58 +282,60 @@ func run(ctx context.Context, pool *pgxpool.Pool, pgDataDir string, cfg config.C
 		loaded int
 		lastID int64
 	)
-	for _, target := range opts.Rows {
+	for _, target := range scales {
 		lg.Printf("== Escala %d filas ==", target)
 		sc := Scale{Rows: target}
 
-		if err := dropIndexes(ctx, conn, defs); err != nil {
-			return rep, err
-		}
-		if _, err := conn.Exec(ctx, "SET maintenance_work_mem = '"+buildMaintenanceWorkMem+"'"); err != nil {
-			return rep, fmt.Errorf("no se pudo fijar maintenance_work_mem: %w", err)
+		if !opts.Reuse {
+			if err := dropIndexes(ctx, conn, defs); err != nil {
+				return rep, err
+			}
+			if _, err := conn.Exec(ctx, "SET maintenance_work_mem = '"+buildMaintenanceWorkMem+"'"); err != nil {
+				return rep, fmt.Errorf("no se pudo fijar maintenance_work_mem: %w", err)
+			}
+
+			// Load.
+			toLoad := target - loaded
+			lg.Printf("Cargando %d filas con COPY...", toLoad)
+			topicsOfRows := make([]int32, 0, toLoad)
+			start := time.Now()
+			copied, err := loadMemories(ctx, conn, gen, toLoad, &topicsOfRows, lg)
+			if err != nil {
+				return rep, err
+			}
+			sc.LoadTime = time.Since(start)
+			if copied != int64(toLoad) {
+				return rep, fmt.Errorf("el COPY insertó %d filas y se esperaban %d", copied, toLoad)
+			}
+			lg.Printf("Carga: %.2f s", sc.LoadTime.Seconds())
+
+			start = time.Now()
+			lastID, err = fillMemoryTopics(ctx, conn, topicsOfRows, topicIDs, lastID, toLoad)
+			if err != nil {
+				return rep, err
+			}
+			lg.Printf("memory_topics rellenada en %.2f s", time.Since(start).Seconds())
+			loaded = target
+
+			// Indexes.
+			lg.Printf("Construyendo el índice HNSW...")
+			start = time.Now()
+			if _, err := conn.Exec(ctx, defs.hnswDef); err != nil {
+				return rep, fmt.Errorf("no se pudo crear el índice HNSW: %w", err)
+			}
+			sc.HNSWBuild = time.Since(start)
+			lg.Printf("Índice HNSW: %.2f s", sc.HNSWBuild.Seconds())
+
+			lg.Printf("Construyendo el índice GIN...")
+			start = time.Now()
+			if _, err := conn.Exec(ctx, defs.ginDef); err != nil {
+				return rep, fmt.Errorf("no se pudo crear el índice GIN: %w", err)
+			}
+			sc.GINBuild = time.Since(start)
+			lg.Printf("Índice GIN: %.2f s", sc.GINBuild.Seconds())
 		}
 
-		// Load.
-		toLoad := target - loaded
-		lg.Printf("Cargando %d filas con COPY...", toLoad)
-		topicsOfRows := make([]int32, 0, toLoad)
 		start := time.Now()
-		copied, err := loadMemories(ctx, conn, gen, toLoad, &topicsOfRows, lg)
-		if err != nil {
-			return rep, err
-		}
-		sc.LoadTime = time.Since(start)
-		if copied != int64(toLoad) {
-			return rep, fmt.Errorf("el COPY insertó %d filas y se esperaban %d", copied, toLoad)
-		}
-		lg.Printf("Carga: %.2f s", sc.LoadTime.Seconds())
-
-		start = time.Now()
-		lastID, err = fillMemoryTopics(ctx, conn, topicsOfRows, topicIDs, lastID, toLoad)
-		if err != nil {
-			return rep, err
-		}
-		lg.Printf("memory_topics rellenada en %.2f s", time.Since(start).Seconds())
-		loaded = target
-
-		// Indexes.
-		lg.Printf("Construyendo el índice HNSW...")
-		start = time.Now()
-		if _, err := conn.Exec(ctx, defs.hnswDef); err != nil {
-			return rep, fmt.Errorf("no se pudo crear el índice HNSW: %w", err)
-		}
-		sc.HNSWBuild = time.Since(start)
-		lg.Printf("Índice HNSW: %.2f s", sc.HNSWBuild.Seconds())
-
-		lg.Printf("Construyendo el índice GIN...")
-		start = time.Now()
-		if _, err := conn.Exec(ctx, defs.ginDef); err != nil {
-			return rep, fmt.Errorf("no se pudo crear el índice GIN: %w", err)
-		}
-		sc.GINBuild = time.Since(start)
-		lg.Printf("Índice GIN: %.2f s", sc.GINBuild.Seconds())
-
-		start = time.Now()
 		if _, err := conn.Exec(ctx, "ANALYZE memories"); err != nil {
 			return rep, fmt.Errorf("falló ANALYZE memories: %w", err)
 		}
@@ -299,29 +344,78 @@ func run(ctx context.Context, pool *pgxpool.Pool, pgDataDir string, cfg config.C
 		}
 		lg.Printf("ANALYZE: %.2f s", time.Since(start).Seconds())
 
+		// The partial indexes of the topic card come from the migration: they must exist, and
+		// the plan of each statement should use its own.
+		if err := requireIndexes(ctx, conn, profileIndex, eventsIndex); err != nil {
+			return rep, err
+		}
+		if len(topicIDs) > 0 {
+			sc.ProfileIndexUsed, err = planUsesIndex(ctx, conn, sqls.profile, profileIndex, topicIDs[0], profileLimit)
+			if err != nil {
+				return rep, err
+			}
+			sc.EventsIndexUsed, err = planUsesIndex(ctx, conn, sqls.events, eventsIndex, topicIDs[0], eventsLimit)
+			if err != nil {
+				return rep, err
+			}
+		}
+		if !sc.ProfileIndexUsed {
+			lg.Printf("AVISO: el plan de ProfileSQL no usa el índice %s", profileIndex)
+		}
+		if !sc.EventsIndexUsed {
+			lg.Printf("AVISO: el plan de EventsSQL no usa el índice %s", eventsIndex)
+		}
+
 		// Queries: the same for every scale. Exact tokens come from the first scale's rows.
 		if qs.vecs == nil {
-			exact := slices.Clone(gen.exactTokens)
+			var exact []string
+			if opts.Reuse {
+				exact, err = readExactTokens(ctx, conn, opts.Rows[0])
+				if err != nil {
+					return rep, err
+				}
+			} else {
+				exact = slices.Clone(gen.exactTokens)
+			}
 			qs = newQuerySet(gen, warmup+opts.Queries, topicIDs, exact)
 		}
 
-		if _, err := conn.Exec(ctx, fmt.Sprintf("SET hnsw.ef_search = %d", efSearch)); err != nil {
-			return rep, fmt.Errorf("no se pudo fijar hnsw.ef_search: %w", err)
-		}
-		lg.Printf("Midiendo latencias (%d consultas, %d de calentamiento)...", opts.Queries, warmup)
-		lat, err := measureLatencies(ctx, conn, sqls, qs, opts.Queries)
+		lg.Printf("Midiendo texto y ficha de tema (%d consultas, %d de calentamiento)...", opts.Queries, warmup)
+		q3, q4, err := measureShared(ctx, conn, sqls, qs, opts.Queries)
 		if err != nil {
 			return rep, err
 		}
-		sc.Q1, sc.Q2, sc.Q3, sc.Q4, sc.Total = lat.Q1, lat.Q2, lat.Q3, lat.Q4, lat.Total
-		lg.Printf("Total p50 / p95: %s / %s ms", ms(sc.Total.P50), ms(sc.Total.P95))
+		sc.Q3, sc.Q4 = summarize(q3), summarize(q4)
 
-		lg.Printf("Midiendo recall@10 (%d consultas)...", opts.TruthQueries)
-		sc.Recall, err = measureRecall(ctx, conn, sqls, qs, opts.TruthQueries)
+		lg.Printf("Calculando la búsqueda exacta (%d consultas)...", opts.TruthQueries)
+		truth, err := measureTruth(ctx, conn, sqls, qs, opts.TruthQueries)
 		if err != nil {
 			return rep, err
 		}
-		lg.Printf("recall@10 = %.3f", sc.Recall)
+
+		for _, cand := range opts.Candidates {
+			ef, err := setEfSearch(ctx, conn, cand)
+			if err != nil {
+				return rep, err
+			}
+			lg.Printf("Midiendo Q1 y Q2 con %d candidatos (hnsw.ef_search = %d)...", cand, ef)
+			q1, q2, err := measureSemantic(ctx, conn, sqls, qs, opts.Queries, cand)
+			if err != nil {
+				return rep, err
+			}
+			rc, err := measureRecall(ctx, conn, sqls, qs, truth, cand)
+			if err != nil {
+				return rep, err
+			}
+			cr := CandidateResult{
+				Candidates: cand, EfSearch: ef,
+				Q1: summarize(q1), Q2: summarize(q2), Recall: rc,
+				Total: summarize(sumSamples(q1, q2, q3, q4)),
+			}
+			sc.Candidates = append(sc.Candidates, cr)
+			lg.Printf("%d candidatos: total p50 / p95 %s / %s ms, recall@10 = %.3f",
+				cand, ms(cr.Total.P50), ms(cr.Total.P95), cr.Recall)
+		}
 
 		sz, err := measureSizes(ctx, conn, defs)
 		if err != nil {
@@ -341,6 +435,89 @@ func run(ctx context.Context, pool *pgxpool.Pool, pgDataDir string, cfg config.C
 
 	rep.Embed = measureEmbedding(ctx, cfg, opts.EmbedQueries, lg)
 	return rep, nil
+}
+
+// Names of the partial indexes of the topic card, created by migration 0002.
+const (
+	profileIndex = "memory_topics_profile_idx"
+	eventsIndex  = "memory_topics_events_idx"
+)
+
+// requireIndexes fails if any of the named indexes does not exist.
+func requireIndexes(ctx context.Context, conn *pgx.Conn, names ...string) error {
+	for _, name := range names {
+		var exists bool
+		if err := conn.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", pgx.Identifier{name}.Sanitize()).Scan(&exists); err != nil {
+			return fmt.Errorf("no se pudo comprobar el índice %s: %w", name, err)
+		}
+		if !exists {
+			return fmt.Errorf("falta el índice %s en la base %s", name, benchDatabase)
+		}
+	}
+	return nil
+}
+
+// planUsesIndex runs EXPLAIN on a statement of the topic card, with the planner settings of
+// the session (nothing is disabled) and the given topic and limit, and tells whether the plan
+// mentions the index.
+func planUsesIndex(ctx context.Context, conn *pgx.Conn, sql, index string, topicID int64, limit int) (bool, error) {
+	rows, err := conn.Query(ctx, "EXPLAIN (FORMAT TEXT) "+sql, topicID, limit)
+	if err != nil {
+		return false, fmt.Errorf("no se pudo obtener el plan de la ficha de tema: %w", err)
+	}
+	defer rows.Close()
+	used := false
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return false, fmt.Errorf("no se pudo leer el plan de la ficha de tema: %w", err)
+		}
+		if strings.Contains(line, index) {
+			used = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("no se pudo obtener el plan de la ficha de tema: %w", err)
+	}
+	return used, nil
+}
+
+// readTopicIDs returns the ids of the topics already in the database, in generation order,
+// and checks that there are n of them. It is used when the data is reused.
+func readTopicIDs(ctx context.Context, conn *pgx.Conn, n int) ([]int64, error) {
+	ids, err := queryIDs(ctx, conn, "SELECT id FROM topics ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("no se pudieron leer los temas: %w", err)
+	}
+	if len(ids) != n {
+		return nil, fmt.Errorf("--reuse: la base tiene %d temas y se esperaban %d (los de --topics); "+
+			"ejecuta sin --reuse para cargar los datos", len(ids), n)
+	}
+	return ids, nil
+}
+
+// readExactTokens returns the plate-like tokens (1234-ABC) of the first rows of the database,
+// in id order and capped at maxExactTokens: the same ones the generator remembers while
+// loading those rows, so a reused run builds the same queries as the run that loaded the data.
+func readExactTokens(ctx context.Context, conn *pgx.Conn, firstRows int) ([]string, error) {
+	rows, err := conn.Query(ctx, `SELECT substring(content from '\d{4}-[A-Z]{3}') FROM memories
+		WHERE id <= $1 AND content ~ '\d{4}-[A-Z]{3}' ORDER BY id LIMIT $2`, firstRows, maxExactTokens)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudieron leer los tokens exactos: %w", err)
+	}
+	defer rows.Close()
+	var tokens []string
+	for rows.Next() {
+		var tok string
+		if err := rows.Scan(&tok); err != nil {
+			return nil, fmt.Errorf("no se pudo leer un token exacto: %w", err)
+		}
+		tokens = append(tokens, tok)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("no se pudieron leer los tokens exactos: %w", err)
+	}
+	return tokens, nil
 }
 
 // indexDefs are the definitions used to recreate the two indexes dropped around each load.

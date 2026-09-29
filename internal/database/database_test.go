@@ -198,8 +198,23 @@ func TestMigrate(t *testing.T) {
 	if err := tc.Pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 1 {
-		t.Errorf("schema_migrations tiene %d filas, se esperaba 1", applied)
+	if applied != 2 {
+		t.Errorf("schema_migrations tiene %d filas, se esperaban 2", applied)
+	}
+
+	// 0002 sustituye el índice de la ficha del tema por dos parciales.
+	for name, want := range map[string]bool{
+		"memory_topics_topic_id_kind_ts_idx": false,
+		"memory_topics_profile_idx":          true,
+		"memory_topics_events_idx":           true,
+	} {
+		var exists bool
+		if err := tc.Pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != want {
+			t.Errorf("índice %s: existe = %v, se esperaba %v", name, exists, want)
+		}
 	}
 
 	tablas := []string{
