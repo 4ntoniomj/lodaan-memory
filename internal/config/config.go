@@ -15,7 +15,7 @@ import (
 
 // Config is the full lodan configuration.
 type Config struct {
-	DataDir            string  `json:"data_dir"`
+	DataDir            string  `json:"-"` // never persisted: comes from LODAN_DATA_DIR or the OS default
 	PGPort             int     `json:"pg_port"`
 	PGBinDir           string  `json:"pg_bin_dir"`
 	OllamaURL          string  `json:"ollama_url"`
