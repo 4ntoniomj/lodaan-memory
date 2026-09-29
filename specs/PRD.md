@@ -85,7 +85,7 @@ Por orden de prioridad:
 | R10 | **Degradación sin embeddings**, según el alcance. | O1, O5 |
 | R11 | **Solo localhost y un único usuario.** Ningún componente escucha fuera de la interfaz de loopback y la base de datos no acepta conexiones sin autenticar. | O5 |
 | R12 | **Modelo de embeddings siempre cargado en memoria**, para evitar la latencia de carga en la primera consulta. | O1 |
-| R13 | **Instalación a nivel de usuario** en las plataformas del alcance, sin permisos de administrador: arranque automático, configuración de clientes MCP detectados y reutilización de Ollama existente. | O4, O5 |
+| R13 | **Instalación con servicio de sistema nativo** (decisión del usuario del 2026-09-29): `lodan install` pide administrador una vez para registrar lodan como servicio de sistema (systemd en Linux, LaunchDaemon en macOS, servicio en `services.msc` en Windows); el resto (clientes MCP detectados, skill, datos) queda en el perfil del usuario. `lodan service start|stop|restart|status|enable|disable` gestiona el servicio con el gestor nativo de cada SO. Reutiliza un Ollama existente. | O4, O5 |
 | R14 | **Skill de uso de lodan**, con varias reglas: guardar sin interrumpir lo que tiene sustancia (con los ejemplos del usuario: "quiero que la base de datos use embeddings" sí se guarda; "eres el agente orquestador" no); avisar en una línea de qué se guardó; recuperar el contexto de un tema en cuanto sale en la conversación; volver a consultar tras una compactación de contexto; cerrar la sesión con un resumen. Las mismas reglas básicas viajan en las instrucciones del propio servidor MCP para clientes sin soporte de skills. | O2, O6 |
 | R15 | **Benchmark reproducible** a 10 mil, 1 millón y 10 millones de registros. | O1 |
 
@@ -97,7 +97,7 @@ Por orden de prioridad:
   - servidor MCP escrito en Go;
   - PostgreSQL con la extensión pgvector como base de datos;
   - Ollama para generar los embeddings.
-- **Nativo en Windows, Linux y macOS**, instalable y configurable a nivel de usuario.
+- **Nativo en Windows, Linux y macOS**, configurable a nivel de usuario y ejecutado como **servicio de sistema** gestionable con las herramientas nativas (`systemctl`, `services.msc`, `launchctl`); la instalación pide administrador una sola vez para registrar el servicio.
 - **Solo localhost.** Ningún dispositivo de la red local puede acceder.
 - **Un único usuario y un único contexto.**
 - **Máquina de referencia:** 8 GB de RAM, sin GPU.

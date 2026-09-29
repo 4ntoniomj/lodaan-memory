@@ -5,13 +5,13 @@
 ## Fase 0 — Preparación
 
 - [ ] 1. Mover la skill a `skills/lodan-memoria/` del repo (copia de `~/.claude/skills/lodan-memoria`), embebida con `embed.FS`; cambiar el modelo por defecto a `embeddinggemma:300m-qat-q4_0`; corregir `NewTestCluster` para que respete `LODAN_PG_BIN_DIR`.
-- [ ] 2. `lodan db start --foreground` (postgres en primer plano con reenvío de señales).
+- [ ] 2. `lodan service run`: supervisor en primer plano (postgres en primer plano, reenvío de señales, mantenimiento) y `lodan service start|stop|restart|status|enable|disable`.
 
 ## Fase 1 — Dependencias
 
 - [ ] 3. [P] `micromamba.go`: descarga + sha256, `create` del entorno (PG 16 en Windows) y localización de los binarios por SO, con tests.
 - [ ] 4. [P] `ollama.go`: detección, descarga y extracción del archivo oficial por SO (zstd, tgz y zip), arranque de usuario y `pull` con progreso, con tests (`httptest`).
-- [ ] 5. [P] `autostart_*.go`: systemd `--user`, LaunchAgent y `HKCU\…\Run`, con tests que generan los archivos en un directorio temporal.
+- [ ] 5. [P] `service_*.go`: unidad systemd de sistema, LaunchDaemon y servicio SCM de Windows (instalar, quitar, controlar), con tests que generan los archivos en un directorio temporal; elevación (`sudo` / UAC) solo en ese paso.
 
 ## Fase 2 — Integración con clientes
 

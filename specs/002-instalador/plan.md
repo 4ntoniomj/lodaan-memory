@@ -41,7 +41,12 @@ skills/lodan-memoria/  # fuente de la skill en el repo, embebida en el binario
   - Arranca con `OLLAMA_HOST=127.0.0.1:11434` y `OLLAMA_MODELS=<datos>/runtime/ollama/models`.
   - Antes de descargar ~1,5 GB se pide confirmación.
 - **Modelo por defecto:** `embeddinggemma:300m-qat-q4_0` (239 MB), el mismo con el que se calibraron los umbrales. Cambia el valor por defecto de `config`.
-- **Arranque automático:**
+- **Servicios de sistema (decisión B del usuario):**
+  - Linux: `/etc/systemd/system/lodan.service` (`User=`, `ExecStart=<bin> service run`, `Restart=on-failure`, `WantedBy=multi-user.target`), instalado con `sudo <bin> service install …` que el instalador invoca en ese paso.
+  - macOS: `/Library/LaunchDaemons/com.lodan.plist` con `UserName`, `RunAtLoad`, `KeepAlive`; `launchctl bootstrap system`.
+  - Windows: servicio del SCM implementado con `golang.org/x/sys/windows/svc` y registrado con `svc/mgr`; el instalador se relanza elevado (UAC) solo para ese paso. Cuenta del servicio y ruta de datos: a decidir con la prueba real (PostgreSQL rechaza cuentas administradoras; opción inicial: cuenta virtual del servicio con datos en `%ProgramData%\lodan` y permisos solo para ella).
+  - `lodan service start|stop|restart|status|enable|disable` traduce a `systemctl`, `svc/mgr` o `launchctl`.
+- **(Sustituido) Arranque automático de usuario:**
   - Linux: unidad `lodan.service` en `~/.config/systemd/user`, con `ExecStart=<bin> db start --foreground` y `Restart=on-failure`, más la de Ollama si lo instaló lodan. Se activa con `systemctl --user enable --now`. `loginctl enable-linger` no se ejecuta (puede pedir polkit); se ofrece como consejo.
   - macOS: LaunchAgents `com.lodan.postgres` y `com.lodan.ollama` con `RunAtLoad` y `KeepAlive`, cargados con `launchctl bootstrap gui/<uid>`.
   - Windows: valor `lodan` en `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` con `<bin> db start --foreground`, usando `golang.org/x/sys/windows/registry` (ya es dependencia indirecta).
