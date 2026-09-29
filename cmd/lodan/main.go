@@ -23,7 +23,8 @@ Subcomandos:
   db        Gestiona el PostgreSQL local: init | start | stop | status
   migrate   Aplica las migraciones pendientes
   status    Muestra el estado de la base de datos y de Ollama
-  bench     Ejecuta el benchmark (--rows, --out)
+  service   Gestiona el servicio de sistema: run | start | stop | restart | enable | disable | status
+  bench    Ejecuta el benchmark (--rows, --out)
 
 Usa "lodan <subcomando> -h" para ver las opciones de cada uno.
 `
@@ -52,6 +53,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMigrate(rest, stdout, stderr)
 	case "status":
 		return runStatus(rest, stdout, stderr)
+	case "service":
+		return runService(rest, stdout, stderr)
 	case "bench":
 		return runBench(rest, stderr)
 	default:

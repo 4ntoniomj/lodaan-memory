@@ -61,6 +61,20 @@ func (c *Cluster) exe(name string) string {
 	return filepath.Join(c.binDir, name)
 }
 
+// Exe returns the full path of a PostgreSQL executable (postgres, pg_ctl...), adding .exe on
+// Windows. The service supervisor uses it to run postgres in the foreground.
+func (c *Cluster) Exe(name string) string { return c.exe(name) }
+
+// Lock takes the cross-process lock that serializes cluster startup (the same one that
+// EnsureRunning uses) and returns the function that releases it, which is safe to call more
+// than once.
+func (c *Cluster) Lock(ctx context.Context) (unlock func(), err error) {
+	if err := os.MkdirAll(c.cfg.DataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("no se pudo crear el directorio de datos %s: %w", c.cfg.DataDir, err)
+	}
+	return acquireLock(ctx, c.cfg.LockFile())
+}
+
 // run executes a PostgreSQL binary and returns its combined output.
 func (c *Cluster) run(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.exe(name), args...)
