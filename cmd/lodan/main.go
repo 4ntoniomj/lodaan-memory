@@ -75,12 +75,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return code
 		}
 	case "bench":
-		fs := newFlagSet(name, "lodan bench [--rows n1,n2,...] [--out fichero]", stderr)
-		fs.String("rows", "", "tamaños del benchmark separados por comas, p. ej. 10000,100000")
-		fs.String("out", "", "fichero markdown de salida")
-		if code, done := parseFlags(fs, rest); done {
-			return code
-		}
+		return runBench(rest, stderr)
 	default:
 		fmt.Fprintf(stderr, "lodan: subcomando desconocido %q\n\n", name)
 		fmt.Fprint(stderr, usageText)
