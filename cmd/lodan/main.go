@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-
-	"lodan/internal/config"
 )
+
+// version is the release version. It is "dev" unless set at build time with
+// -ldflags "-X main.version=...".
+var version = "dev"
 
 const usageText = `lodan: servidor de memoria para asistentes de IA
 
@@ -43,37 +45,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usageText)
 		return 0
 	case "serve":
-		fs := newFlagSet(name, "lodan serve [--http] [--addr dirección]", stderr)
-		fs.Bool("http", false, "usar transporte HTTP en lugar de stdio")
-		fs.String("addr", "", "dirección de escucha HTTP (vacío = la de la configuración)")
-		if code, done := parseFlags(fs, rest); done {
-			return code
-		}
+		return runServe(rest, stderr)
 	case "db":
-		fs := newFlagSet(name, "lodan db init|start|stop|status", stderr)
-		if code, done := parseFlags(fs, rest); done {
-			return code
-		}
-		if fs.NArg() != 1 {
-			fmt.Fprintln(stderr, "lodan db: falta la acción (init|start|stop|status)")
-			return 2
-		}
-		switch fs.Arg(0) {
-		case "init", "start", "stop", "status":
-		default:
-			fmt.Fprintf(stderr, "lodan db: acción desconocida %q (usa init|start|stop|status)\n", fs.Arg(0))
-			return 2
-		}
+		return runDB(rest, stdout, stderr)
 	case "migrate":
-		fs := newFlagSet(name, "lodan migrate", stderr)
-		if code, done := parseFlags(fs, rest); done {
-			return code
-		}
+		return runMigrate(rest, stdout, stderr)
 	case "status":
-		fs := newFlagSet(name, "lodan status", stderr)
-		if code, done := parseFlags(fs, rest); done {
-			return code
-		}
+		return runStatus(rest, stdout, stderr)
 	case "bench":
 		return runBench(rest, stderr)
 	default:
@@ -81,13 +59,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
-
-	if _, err := config.Load(); err != nil {
-		fmt.Fprintf(stderr, "lodan %s: %v\n", name, err)
-		return 1
-	}
-	fmt.Fprintf(stderr, "lodan %s: no implementado todavía\n", name)
-	return 2
 }
 
 // newFlagSet creates a FlagSet that reports errors and help to w.
