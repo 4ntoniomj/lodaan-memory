@@ -9,6 +9,7 @@ Memoria persistente local para asistentes de IA. Guarda decisiones, preferencias
 - [Instalación](#instalación)
 - [Uso básico](#uso-básico)
 - [Comandos CLI](#comandos-cli)
+- [Backup y Restauración](#backup-y-restauración)
 - [Documentación técnica](#documentación-técnica)
 - [Arquitectura](#arquitectura)
 - [Estructura del proyecto](#estructura-del-proyecto)
@@ -123,6 +124,59 @@ Tabla de comandos disponibles:
 | `install` | Descarga y configura PostgreSQL, Ollama, skill (primera vez) | `./lodan install` |
 | `doctor` | Verifica que todo funciona (PostgreSQL, Ollama, conectividad) | `./lodan doctor` |
 | `uninstall` | Desinstala servicios y limpia la configuración | `./lodan uninstall` |
+
+---
+
+## Backup y Restauración
+
+lodan permite crear backups de la base de datos con tres estrategias: **full** (copia completa), **incremental** (cambios desde el último backup) y **differential** (cambios desde el último full). Los backups se almacenan como archivos `.tar.xz` comprimidos.
+
+### Tipos de backup
+
+- **Full (`--type full`):** Copia completa de todos los datos. Base para backups posteriores. Defecto si no especificas nada.
+- **Incremental (`--type incremental`):** Copia solo cambios desde el último backup (full o incremental anterior). Más rápido y compacto.
+- **Differential (`--type differential`):** Copia solo cambios desde el último backup full. Opción intermedia en tamaño y velocidad.
+
+### Ejemplos de uso
+
+#### Crear backups
+
+```bash
+# Full backup (por defecto)
+./lodan db backup --to /backups
+
+# Incremental (requiere un full previo)
+./lodan db backup --to /backups --type incremental
+
+# Differential (requiere un full previo)
+./lodan db backup --to /backups --type differential
+```
+
+Los archivos se guardan con nombre: `lodan_backup_YYYY-MM-DD_HHMMSS.{full|incremental|differential}.tar.xz`
+
+#### Restaurar desde un archivo específico
+
+```bash
+# Restaurar desde un backup específico (full)
+./lodan db restore --from /backups/lodan_backup_2026-10-01_120000.full.tar.xz
+```
+
+#### Restauración automática
+
+```bash
+# Auto-detecta el backup más reciente y restaura (full → incremental/differential)
+./lodan db restore --from /backups
+```
+
+Cuando restauras desde un directorio sin especificar archivo, lodan ordena los backups por fecha (RFC3339Nano en `info.txt`), elige el full más reciente y aplica los incrementales/diferenciales posteriores de forma secuencial.
+
+### Advertencia de downtime
+
+**Durante un backup o restauración, el servidor se detiene brevemente (~5 segundos).** Durante este tiempo, los clientes MCP no pueden conectar. Planifica backups en momentos de baja actividad si es crítico.
+
+### Retención de backups
+
+La gestión automática de retención (eliminar backups antiguos) se implementará mediante un script bash en futuro. Por ahora, mantén el directorio de backups manualmente.
 
 ---
 

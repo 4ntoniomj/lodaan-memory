@@ -28,3 +28,81 @@
 | embeddinggemma | modelo de embeddings | `300m-qat-q4_0` (por defecto) | Multilingüe, 768 dimensiones; por defecto, configurable. Umbrales calibrados en `specs/001-nucleo-memoria/calibracion.md` |
 
 > Go, PostgreSQL, pgvector, Ollama y el modelo no aparecen en `go.mod`: `detectar_stack.py` los reporta como «no detectados» y se mantienen documentados a propósito.
+
+---
+
+## Módulos de implementación
+
+Estado actual de cada funcionalidad en `internal/`:
+
+### Database cluster
+
+Gestión de la conexión a PostgreSQL, pool de conexiones y operaciones de base de datos.
+
+**Ubicación:** `internal/database/`
+
+**Responsabilidades:**
+- Inicializar y mantener pool de conexiones a PostgreSQL.
+- Ejecutar migraciones de esquema.
+- Gestionar transacciones para coherencia de datos.
+
+#### Backup y Restauración
+
+Los backups se almacenan como archivos comprimidos `.tar.xz` con metadatos en `info.txt`.
+
+**Estrategias de backup:**
+- **Full:** Copia completa de la base de datos y datos asociados.
+- **Incremental:** Cambios desde el último backup (full o incremental).
+- **Differential:** Cambios desde el último backup full.
+
+**Flujo de Backup (`Backup()`):**
+
+```
+1. Adquirir lock de base de datos (evitar escrituras concurrentes)
+2. Detener servicios MCP (puerto 9999)
+3. Recopilar datos según estrategia:
+   - Full: copiar datos completos de PostgreSQL
+   - Incremental/Differential: identificar cambios desde backup anterior
+4. Empaquetar en TAR.XZ con metadatos:
+   - info.txt: timestamp (RFC3339Nano), tipo, hash de integridad
+   - data/: contenido de la base de datos
+5. Escribir archivo: lodan_backup_YYYY-MM-DD_HHMMSS.{full|incremental|differential}.tar.xz
+6. Reanudar servicios
+7. Liberar lock
+```
+
+**Flujo de Restauración (`Restore()`):**
+
+```
+1. Adquirir lock de base de datos
+2. Auto-detectar backup (si se especifica directorio):
+   - Ordenar archivos por fecha (RFC3339Nano en info.txt)
+   - Seleccionar full más reciente
+   - Recopilar todos los incremental/differential posteriores
+3. Detener servicios MCP
+4. Extraer backup full
+5. Aplicar incremental/differential en orden cronológico
+6. Verificar integridad de datos (hash en info.txt)
+7. Reanudar servicios
+8. Liberar lock
+```
+
+**Metadatos (`info.txt`):**
+
+Cada backup incluye un archivo `info.txt` con:
+- `timestamp`: fecha/hora en RFC3339Nano
+- `type`: full, incremental, o differential
+- `hash`: SHA256 del contenido para verificación
+- `base_backup_id`: (si incremental/differential) referencia al full anterior
+
+La restauración automática ordena por `timestamp` para asegurar aplicación correcta de cambios.
+
+### Otros módulos
+
+- **memory:** Guardar registros (`internal/memory/`).
+- **recall:** Búsqueda por tema (`internal/recall/`).
+- **topic:** Gestión de etiquetas y temas (`internal/topic/`).
+- **session:** Sesiones y contexto (`internal/session/`).
+- **embedding:** Cálculo y búsqueda de embeddings vía Ollama (`internal/embedding/`).
+- **mcptools:** Definición de herramientas MCP (`internal/mcptools/`).
+- **config:** Configuración global (`internal/config/`).
