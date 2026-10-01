@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,21 +83,32 @@ func openStack(ctx context.Context, cfg config.Config, logger *log.Logger) (mcpt
 	return deps, pool.Close, nil
 }
 
-// runDB implements `lodan db init|start|stop|status`.
+// runDB implements `lodan db init|start|stop|status|backup|restore`.
 func runDB(args []string, stdout, stderr io.Writer) int {
-	fs := newFlagSet("db", "lodan db init|start|stop|status", stderr)
+	// backup and restore take their own flags after the action, which the generic flag set
+	// below (flags before the action) cannot parse.
+	if len(args) > 0 {
+		switch args[0] {
+		case "backup":
+			return runDBBackup(args[1:], stdout, stderr)
+		case "restore":
+			return runDBRestore(args[1:], stdout, stderr)
+		}
+	}
+
+	fs := newFlagSet("db", "lodan db init|start|stop|status|backup|restore", stderr)
 	if code, done := parseFlags(fs, args); done {
 		return code
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "lodan db: falta la acción (init|start|stop|status)")
+		fmt.Fprintln(stderr, "lodan db: falta la acción (init|start|stop|status|backup|restore)")
 		return 2
 	}
 	action := fs.Arg(0)
 	switch action {
 	case "init", "start", "stop", "status":
 	default:
-		fmt.Fprintf(stderr, "lodan db: acción desconocida %q (usa init|start|stop|status)\n", action)
+		fmt.Fprintf(stderr, "lodan db: acción desconocida %q (usa init|start|stop|status|backup|restore)\n", action)
 		return 2
 	}
 
@@ -143,6 +156,151 @@ func runDB(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "lodan db %s: %v\n", action, err)
 		return 1
+	}
+	return 0
+}
+
+// runDBBackup implements `lodan db backup [--to destino] [--full|--incremental|--differential]`.
+func runDBBackup(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("db backup", "lodan db backup [--to destino] [--full|--incremental|--differential]", stderr)
+	to := fs.String("to", os.TempDir(), "directorio donde se crea el backup (por defecto el temporal del sistema, /tmp en Linux)")
+	full := fs.Bool("full", false, "backup completo (es el tipo por defecto)")
+	incr := fs.Bool("incremental", false, "solo los cambios desde el último backup full del destino")
+	diff := fs.Bool("differential", false, "solo los cambios desde el último backup full o differential del destino")
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "lodan db backup: argumentos inesperados: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+
+	backupType := database.BackupFull
+	chosen := 0
+	if *full {
+		chosen++
+	}
+	if *incr {
+		chosen++
+		backupType = database.BackupIncremental
+	}
+	if *diff {
+		chosen++
+		backupType = database.BackupDifferential
+	}
+	if chosen > 1 {
+		fmt.Fprintln(stderr, "lodan db backup: usa solo una de --full, --incremental o --differential")
+		return 2
+	}
+
+	dest, err := filepath.Abs(*to)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db backup: ruta de destino inválida: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db backup: %v\n", err)
+		return 1
+	}
+	cluster, err := database.NewCluster(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db backup: %v\n", err)
+		return 1
+	}
+	ctx, stop := signalContext()
+	defer stop()
+
+	path, err := cluster.Backup(ctx, dest, backupType)
+	if path != "" {
+		// The archive exists even if PostgreSQL could not be restarted afterwards.
+		fmt.Fprintf(stdout, "Backup creado: %s\n", path)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db backup: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// pathList is a flag.Value that collects every occurrence of a repeated flag.
+type pathList []string
+
+func (p *pathList) String() string { return strings.Join(*p, ", ") }
+
+func (p *pathList) Set(v string) error {
+	*p = append(*p, v)
+	return nil
+}
+
+// runDBRestore implements `lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...]` and
+// `lodan db restore --from /carpeta`.
+func runDBRestore(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("db restore", "lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...] | --from /carpeta", stderr)
+	var from pathList
+	fs.Var(&from, "from", "backup .tar.xz (pueden seguir más archivos, del más antiguo al más reciente) o carpeta: se restaura el último full y los backups posteriores")
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	inputs := append([]string(from), fs.Args()...)
+	if len(inputs) == 0 {
+		fmt.Fprintln(stderr, "lodan db restore: falta --from (un archivo .tar.xz, varios o una carpeta)")
+		return 2
+	}
+
+	dirs := 0
+	for i, in := range inputs {
+		abs, err := filepath.Abs(in)
+		if err != nil {
+			fmt.Fprintf(stderr, "lodan db restore: ruta inválida %q: %v\n", in, err)
+			return 1
+		}
+		st, err := os.Stat(abs)
+		if err != nil {
+			fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
+			return 1
+		}
+		if st.IsDir() {
+			dirs++
+		}
+		inputs[i] = abs
+	}
+
+	files := inputs
+	switch {
+	case dirs > 0 && len(inputs) > 1:
+		fmt.Fprintln(stderr, "lodan db restore: --from acepta una carpeta o una lista de archivos, no ambas cosas")
+		return 2
+	case dirs == 1:
+		detected, err := database.AutoDetectBackups(inputs[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
+			return 1
+		}
+		files = detected
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
+		return 1
+	}
+	cluster, err := database.NewCluster(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
+		return 1
+	}
+	ctx, stop := signalContext()
+	defer stop()
+
+	previous, err := cluster.Restore(ctx, files)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Restauración completada desde: %s\n", strings.Join(files, ", "))
+	if previous != "" {
+		fmt.Fprintf(stdout, "El clúster anterior se ha conservado en %s: bórralo cuando hayas comprobado la restauración\n", previous)
 	}
 	return 0
 }

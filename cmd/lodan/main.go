@@ -20,7 +20,7 @@ Uso:
 
 Subcomandos:
   serve     Arranca el servidor MCP (stdio por defecto, --http para HTTP local)
-  db        Gestiona el PostgreSQL local: init | start | stop | status
+  db        Gestiona el PostgreSQL local: init | start | stop | status | backup | restore
   migrate   Aplica las migraciones pendientes
   status    Muestra el estado de la base de datos y de Ollama
   install   Instala lodan: PostgreSQL, Ollama, servicio de sistema, clientes MCP y skill
@@ -28,6 +28,15 @@ Subcomandos:
   uninstall Desinstala lodan (los datos se conservan salvo con --purge)
   service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
   bench     Ejecuta el benchmark (--rows, --out)
+
+Copias de seguridad (paran PostgreSQL unos segundos):
+  lodan db backup [--to destino] [--full|--incremental|--differential]
+      Crea destino/lodan_backup_AAAA-MM-DD_HHMMSS.<full|incr|diff>.tar.xz
+      (por defecto un backup full en el directorio temporal del sistema).
+  lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...]
+  lodan db restore --from /carpeta
+      Restaura un full y, opcionalmente, incrementales y diferenciales (del más antiguo
+      al más reciente). Con una carpeta usa el último full y los backups posteriores.
 
 Usa "lodan <subcomando> -h" para ver las opciones de cada uno.
 `
