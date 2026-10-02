@@ -48,54 +48,56 @@ Gestión de la conexión a PostgreSQL, pool de conexiones y operaciones de base 
 
 #### Backup y Restauración
 
-Los backups se almacenan como archivos comprimidos `.tar.xz` con metadatos en `info.txt`.
+Los backups son copias en frío (PostgreSQL parado mientras se leen los archivos), almacenadas como `.tar.zst` (tar comprimido con zstd, `github.com/klauspost/compress/zstd`, nivel por defecto) con `info.txt`, `manifest.txt`, `pg/`, `config.json` (si existe) y `secret`, en ese orden. Formato actual: `lodan-backup/2` (el 1 se rechaza).
 
 **Estrategias de backup:**
-- **Full:** Copia completa de la base de datos y datos asociados.
-- **Incremental:** Cambios desde el último backup (full o incremental).
-- **Differential:** Cambios desde el último backup full.
+- **Full:** Copia completa del clúster.
+- **Differential (`diff`):** Archivos modificados desde el último backup **full** del destino.
+- **Incremental (`incr`):** Archivos modificados desde el último backup **de cualquier tipo** (full, incremental o differential) del destino.
+
+Differential e incremental copian un archivo si su fecha de modificación es posterior al `fecha` del backup de referencia (`desde` en `info.txt`, con 2 s de margen), o si su ruta no figura en el manifiesto de referencia, o si su tamaño difiere del que ese manifiesto indica. Las dos últimas reglas existen porque `rename` conserva la fecha de modificación (PostgreSQL recicla los segmentos de `pg_wal` renombrándolos) y garantizan, por inducción, que la cadena contiene todo lo que lista el manifiesto del último backup. Fallan si el destino no tiene ningún full.
 
 **Flujo de Backup (`Backup()`):**
 
 ```
-1. Adquirir lock de base de datos (evitar escrituras concurrentes)
-2. Detener servicios MCP (puerto 9999)
-3. Recopilar datos según estrategia:
-   - Full: copiar datos completos de PostgreSQL
-   - Incremental/Differential: identificar cambios desde backup anterior
-4. Empaquetar en TAR.XZ con metadatos:
-   - info.txt: timestamp (RFC3339Nano), tipo, hash de integridad
-   - data/: contenido de la base de datos
-5. Escribir archivo: lodan_backup_YYYY-MM-DD_HHMMSS.{full|incremental|differential}.tar.xz
-6. Reanudar servicios
-7. Liberar lock
+1. Validar el destino (no puede estar dentro de pg/) y adquirir el lock del destino (<destino>/.lodan_backup.lock)
+2. Borrar los .lodan_backup_*.staging huérfanos del destino (de un backup interrumpido)
+3. Adquirir el lock del clúster; para incr/diff: localizar el backup de referencia en el destino
+4. Parar PostgreSQL (si estaba en marcha)
+5. Recorrer pg/ una vez: manifiesto completo + archivos a copiar (todos en full; los modificados en incr/diff)
+6. Copiar (sin comprimir) esas entradas, config.json y secret a <destino>/.lodan_backup_<fecha>.<tipo>.staging/ (0700),
+   conservando modo y mtime y comprobando el tamaño de cada archivo
+7. Reiniciar PostgreSQL (si estaba en marcha) y liberar el lock
+8. Con PostgreSQL ya en marcha, escribir lodan_backup_YYYY-MM-DD_HHMMSS.{full|incr|diff}.tar.zst desde el staging
+   (a un .part que se renombra al final)
+9. Borrar siempre el staging (y el .part si falló) y liberar el lock del destino
 ```
+
+La parada de PostgreSQL dura lo que tarda la copia (pasos 4 a 7) y el destino necesita espacio libre para esa copia sin comprimir. El lock se suelta antes de comprimir para no bloquear al supervisor del servicio. El lock del destino (mismo mecanismo que el del clúster: se refresca mientras se mantiene y se considera abandonado a los 2 minutos) serializa los backups hacia el mismo destino de principio a fin, compresión incluida, para que un full lento y un incremental lanzado por cron no se borren el staging. El segundo espera hasta 60 s y, si sigue ocupado, falla con "hay otro backup en curso en el destino". Orden de locks: destino primero, clúster después. `Restore` no usa el lock del destino. `listBackups` y `AutoDetectBackups` ignoran `.lodan_backup.lock`.
+
+**Con el supervisor del servicio (`lodan service run`) en marcha:** PostgreSQL debe seguir siendo hijo del servicio (si no, con systemd el servicio cae y PostgreSQL queda colgando fuera de él). Para eso:
+- El supervisor toca cada 5 s `<datos>/supervisor.heartbeat` (`Config.HeartbeatFile()`) mientras vive, también durante una pausa, y lo borra al salir. `Cluster.SupervisorActive()` es true si el archivo existe y tiene menos de 15 s.
+- `Backup` y `Restore` toman el lock del clúster **antes** de parar PostgreSQL. `Cluster.LockHeld()` dice si ese lock está tomado y no obsoleto (mismo criterio que `acquireLock`). Cuando PostgreSQL termina (hijo del supervisor, arrancado con `pg_ctl` o externo vigilado por sondeo) y `LockHeld()` es true, el supervisor no falla: registra «PostgreSQL parado por una operación de mantenimiento (backup o restauración): se espera a que termine», espera a que se libere el lock y vuelve a `prepareCluster` + `superviseStack` (adopta PostgreSQL si ya está en marcha; si no, lo lanza en primer plano). Sin lock tomado, un PostgreSQL parado sigue siendo un fallo.
+- `Backup`: si PostgreSQL estaba en marcha y `SupervisorActive()`, tras la copia al staging no lo arranca: suelta el lock del clúster y sondea `Status` cada 500 ms (hasta `restartTimeout`, 2 min) a que el supervisor lo arranque, y entonces comprime. Si no vuelve a tiempo, lo arranca él (con el lock) y devuelve un error que lo explica; el archivo se escribe igualmente.
+- `Restore`: igual que antes (arranque propio, verificación y rollback), pero si había supervisor activo, tras verificar con éxito para PostgreSQL de nuevo, suelta el lock y espera al supervisor con la misma lógica y el mismo plan B. Un restore fallido que vuelve al estado anterior con PostgreSQL en marcha también se lo cede al supervisor.
+- Limitación: con el PostgreSQL lanzado con `pg_ctl` (Windows) o externo, el supervisor detecta la parada por sondeo (10 s / 30 s). Si el sondeo cae después de soltarse el lock pero antes de que PostgreSQL vuelva, se trata como fallo: el gestor de servicios reinicia el servicio, que lo lanza, y el plan B de `Backup`/`Restore` cubre el plazo.
 
 **Flujo de Restauración (`Restore()`):**
 
 ```
-1. Adquirir lock de base de datos
-2. Auto-detectar backup (si se especifica directorio):
-   - Ordenar archivos por fecha (RFC3339Nano en info.txt)
-   - Seleccionar full más reciente
-   - Recopilar todos los incremental/differential posteriores
-3. Detener servicios MCP
-4. Extraer backup full
-5. Aplicar incremental/differential en orden cronológico
-6. Verificar integridad de datos (hash en info.txt)
-7. Reanudar servicios
-8. Liberar lock
+1. Validar la cadena (un full primero; cada backup referencia por `desde` a uno anterior de la lista)
+   Con una carpeta, AutoDetectBackups elige el full más reciente y los backups posteriores
+2. Adquirir el lock y parar PostgreSQL (si estaba en marcha)
+3. Extraer la cadena, de más antiguo a más reciente, a un directorio temporal
+4. Con el manifiesto del último backup: borrar lo que no lista y comprobar que cada entrada existe con su tipo y tamaño
+   Si no cuadra: abortar sin tocar el clúster actual
+5. Apartar el clúster actual (pg.pre-restore-<fecha>), instalar el restaurado y arrancar
+6. Si no arranca o no acepta conexiones: volver al estado anterior
 ```
 
-**Metadatos (`info.txt`):**
+**Metadatos (`info.txt`):** una línea `clave: valor` por campo: `formato`, `tipo` (full, incr o diff), `fecha` (RFC3339Nano), `desde` (fecha del backup de referencia; solo incr/diff), `tamano_original_bytes`, `archivos` y `postgresql`.
 
-Cada backup incluye un archivo `info.txt` con:
-- `timestamp`: fecha/hora en RFC3339Nano
-- `type`: full, incremental, o differential
-- `hash`: SHA256 del contenido para verificación
-- `base_backup_id`: (si incremental/differential) referencia al full anterior
-
-La restauración automática ordena por `timestamp` para asegurar aplicación correcta de cambios.
+**Manifiesto (`manifest.txt`):** lista de todo lo que había en `pg/` al hacer el backup (no solo lo copiado), sin `postmaster.pid` ni el propio `pg/`. Una línea por entrada, ordenada por ruta: `<d|f> <tamaño> <ruta/relativa>` (`d` directorio con tamaño 0, `f` archivo regular con su tamaño en bytes). Se lee con un tope de 64 MiB (unas 800.000 entradas). Permite que la restauración elimine lo borrado desde el full y detecte cadenas incompletas.
 
 ### Otros módulos
 

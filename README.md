@@ -129,13 +129,15 @@ Tabla de comandos disponibles:
 
 ## Backup y Restauración
 
-lodan permite crear backups de la base de datos con tres estrategias: **full** (copia completa), **incremental** (cambios desde el último backup) y **differential** (cambios desde el último full). Los backups se almacenan como archivos `.tar.xz` comprimidos.
+lodan permite crear backups de la base de datos con tres estrategias: **full** (copia completa), **differential** (cambios desde el último full) e **incremental** (cambios desde el último backup de cualquier tipo). Los backups se almacenan como archivos `.tar.zst` (tar comprimido con zstd).
 
 ### Tipos de backup
 
-- **Full (`--type full`):** Copia completa de todos los datos. Base para backups posteriores. Defecto si no especificas nada.
-- **Incremental (`--type incremental`):** Copia solo cambios desde el último backup (full o incremental anterior). Más rápido y compacto.
-- **Differential (`--type differential`):** Copia solo cambios desde el último backup full. Opción intermedia en tamaño y velocidad.
+- **Full (`--full`):** Copia completa de todos los datos. Base para backups posteriores. Defecto si no especificas nada.
+- **Differential (`--differential`):** Copia solo los archivos modificados desde el último backup **full** del destino. Opción intermedia en tamaño y velocidad.
+- **Incremental (`--incremental`):** Copia solo los archivos modificados desde el último backup **de cualquier tipo** (full, incremental o differential) del destino. Es el más rápido y compacto.
+
+Differential e incremental necesitan un backup full previo en el destino; sin él fallan con un error claro.
 
 ### Ejemplos de uso
 
@@ -145,20 +147,20 @@ lodan permite crear backups de la base de datos con tres estrategias: **full** (
 # Full backup (por defecto)
 ./lodan db backup --to /backups
 
-# Incremental (requiere un full previo)
-./lodan db backup --to /backups --type incremental
-
 # Differential (requiere un full previo)
-./lodan db backup --to /backups --type differential
+./lodan db backup --to /backups --differential
+
+# Incremental (requiere un full previo)
+./lodan db backup --to /backups --incremental
 ```
 
-Los archivos se guardan con nombre: `lodan_backup_YYYY-MM-DD_HHMMSS.{full|incremental|differential}.tar.xz`
+Los archivos se guardan con nombre: `lodan_backup_YYYY-MM-DD_HHMMSS.{full|diff|incr}.tar.zst`
 
 #### Restaurar desde un archivo específico
 
 ```bash
 # Restaurar desde un backup específico (full)
-./lodan db restore --from /backups/lodan_backup_2026-10-01_120000.full.tar.xz
+./lodan db restore --from /backups/lodan_backup_2026-10-01_120000.full.tar.zst
 ```
 
 #### Restauración automática
@@ -170,9 +172,11 @@ Los archivos se guardan con nombre: `lodan_backup_YYYY-MM-DD_HHMMSS.{full|increm
 
 Cuando restauras desde un directorio sin especificar archivo, lodan ordena los backups por fecha (RFC3339Nano en `info.txt`), elige el full más reciente y aplica los incrementales/diferenciales posteriores de forma secuencial.
 
+Cada backup incluye un manifiesto (`manifest.txt`) con la lista completa de lo que contenía el clúster en ese momento. Al restaurar, lodan extrae toda la cadena a un directorio temporal, borra de él lo que el manifiesto del último backup no lista (archivos eliminados desde el full) y comprueba que no falta nada ni cambia de tipo o tamaño. Si algo no cuadra, aborta sin tocar el clúster actual.
+
 ### Advertencia de downtime
 
-**Durante un backup o restauración, el servidor se detiene brevemente (~5 segundos).** Durante este tiempo, los clientes MCP no pueden conectar. Planifica backups en momentos de baja actividad si es crítico.
+**Durante un backup, el servidor se detiene solo mientras se copian los datos a un directorio temporal dentro del destino** (`.lodan_backup_<fecha>.<tipo>.staging`, que se borra siempre al terminar). La parada dura lo que tarda esa copia sin comprimir; la compresión zstd se hace después, con PostgreSQL ya en marcha. Por eso el destino necesita espacio libre para una copia sin comprimir de lo que se respalda. Durante la parada, y durante una restauración, los clientes MCP no pueden conectar. Planifica backups en momentos de baja actividad si es crítico.
 
 ### Retención de backups
 
