@@ -74,6 +74,35 @@ func withService(name string, fn func(s *mgr.Service) error) error {
 	return fn(s)
 }
 
+// withServiceReadOnly is like withService but opens the SCM with
+// SC_MANAGER_CONNECT and the service with SERVICE_QUERY_STATUS and
+// SERVICE_QUERY_CONFIG only, so querying works without administrator rights.
+// The service passed to fn must only be used for Query and Config.
+func withServiceReadOnly(name string, fn func(s *mgr.Service) error) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	namePtr, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return fmt.Errorf("nombre de servicio no válido %q: %w", name, err)
+	}
+	hm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return wrapErr("no se pudo conectar con el Administrador de control de servicios", err)
+	}
+	defer windows.CloseServiceHandle(hm)
+	hs, err := windows.OpenService(hm, namePtr, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return fmt.Errorf("%w: %s", errNotInstalled, name)
+		}
+		return wrapErr(fmt.Sprintf("no se pudo abrir el servicio %s", name), err)
+	}
+	s := &mgr.Service{Name: name, Handle: hs}
+	defer s.Close() // calls windows.CloseServiceHandle(hs)
+	return fn(s)
+}
+
 func (windowsManager) Install(spec Spec) error {
 	if err := spec.validate(); err != nil {
 		return err
@@ -223,7 +252,8 @@ func setStartType(name string, startType uint32) error {
 
 func (windowsManager) Status(name string) (Status, error) {
 	var st Status
-	err := withService(name, func(s *mgr.Service) error {
+	// Read-only: querying must not need administrator rights.
+	err := withServiceReadOnly(name, func(s *mgr.Service) error {
 		q, err := s.Query()
 		if err != nil {
 			return wrapErr(fmt.Sprintf("no se pudo consultar el servicio %s", name), err)
