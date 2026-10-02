@@ -78,8 +78,19 @@ func (c *Cluster) Lock(ctx context.Context) (unlock func(), err error) {
 // run executes a PostgreSQL binary and returns its combined output.
 func (c *Cluster) run(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.exe(name), args...)
+	return combinedOutput(cmd)
+}
+
+// combinedOutput runs cmd with cmdWaitDelay and returns its trimmed combined output. On Windows
+// `pg_ctl start` leaves the postmaster holding the output pipe, so Wait ends with
+// exec.ErrWaitDelay even though pg_ctl succeeded: os/exec only returns that error when the
+// command otherwise exited successfully, so it is not a failure.
+func combinedOutput(cmd *exec.Cmd) (string, error) {
 	cmd.WaitDelay = cmdWaitDelay
 	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	return strings.TrimSpace(string(out)), err
 }
 
