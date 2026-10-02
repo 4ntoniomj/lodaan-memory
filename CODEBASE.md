@@ -10,6 +10,7 @@
 | github.com/pgvector/pgvector-go | librería | v0.4.1 | Tipos `vector`/`halfvec` para pgx |
 | github.com/oklog/ulid/v2 | librería | v2.1.2 | Identificadores de sesión ordenables por tiempo |
 | github.com/google/jsonschema-go | librería | v0.4.3 | Esquemas de entrada de las herramientas MCP (enums) |
+| github.com/klauspost/compress | librería | v1.20.1 | Descompresión zstd de los paquetes de Ollama |
 | github.com/jackc/pgpassfile | librería | v1.0.0 | Indirecta (pgx) |
 | github.com/jackc/pgservicefile | librería | v0.0.0-20240606120523-5a60cdf6a761 | Indirecta (pgx) |
 | golang.org/x/text | librería | v0.29.0 | Indirecta (pgx) |
@@ -19,7 +20,7 @@
 | github.com/segmentio/encoding | librería | v0.5.4 | Indirecta (SDK MCP) |
 | github.com/yosida95/uritemplate/v3 | librería | v3.0.2 | Indirecta (SDK MCP) |
 | golang.org/x/oauth2 | librería | v0.35.0 | Indirecta (SDK MCP) |
-| golang.org/x/sys | librería | v0.41.0 | Indirecta |
+| golang.org/x/sys | librería | v0.41.0 | Servicio de Windows (SCM) y llamadas al sistema |
 | golang.org/x/time | librería | v0.15.0 | Indirecta |
 | PostgreSQL | base de datos | ≥ 16 (desarrollo: 18) | En Windows, conda-forge solo tiene pgvector para PG 16 |
 | pgvector | base de datos (extensión) | ≥ 0.7.0 (objetivo: 0.8.6) | `halfvec`, `binary_quantize`, HNSW |
