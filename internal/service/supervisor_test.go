@@ -301,6 +301,255 @@ func TestRunSupervisorConPgCtlFallaSiPostgresSeCae(t *testing.T) {
 	}
 }
 
+// fastMaintenancePoll makes a maintenance pause notice the release of the lock quickly.
+func fastMaintenancePoll(t *testing.T) {
+	t.Helper()
+	old := maintenancePollInterval
+	maintenancePollInterval = 100 * time.Millisecond
+	t.Cleanup(func() { maintenancePollInterval = old })
+}
+
+// assertAlive fails the test if RunSupervisor has already returned.
+func assertAlive(t *testing.T, env *supervisorEnv, errc <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errc:
+		t.Fatalf("RunSupervisor terminó y no debía: %v\nlog:\n%s", err, env.logs.String())
+	default:
+	}
+}
+
+// pauseAndResume does what a backup or restore does to PostgreSQL: it takes the cluster lock and
+// stops PostgreSQL under it. The supervisor must stay alive and leave PostgreSQL stopped while
+// the lock is held; once it is released, PostgreSQL must be back and the supervisor still alive.
+// launchLog is the log line of a launch by the supervisor, which must have happened wantLaunches
+// times when it is over.
+func (e *supervisorEnv) pauseAndResume(t *testing.T, errc <-chan error, launchLog string, wantLaunches int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	unlock, err := e.cluster.Lock(ctx)
+	if err != nil {
+		t.Fatalf("no se pudo tomar el lock del clúster: %v", err)
+	}
+	defer unlock() // safe to call twice
+	if err := e.cluster.Stop(ctx); err != nil {
+		t.Fatalf("no se pudo parar PostgreSQL: %v", err)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(e.logs.String(), "parado por una operación de mantenimiento") {
+		if time.Now().After(deadline) {
+			t.Fatalf("el supervisor no registró la pausa de mantenimiento\nlog:\n%s", e.logs.String())
+		}
+		select {
+		case err := <-errc:
+			t.Fatalf("RunSupervisor terminó en vez de esperar al mantenimiento: %v\nlog:\n%s", err, e.logs.String())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// With the lock held the supervisor neither fails nor starts PostgreSQL.
+	select {
+	case err := <-errc:
+		t.Fatalf("RunSupervisor terminó durante el mantenimiento: %v\nlog:\n%s", err, e.logs.String())
+	case <-time.After(2 * time.Second):
+	}
+	if e.running(t) {
+		t.Fatal("el supervisor arrancó PostgreSQL con el lock tomado")
+	}
+
+	unlock()
+	e.awaitMigrated(t, errc)
+	assertAlive(t, e, errc)
+	if !e.running(t) {
+		t.Fatal("PostgreSQL debería estar en marcha tras soltar el lock")
+	}
+	if got := strings.Count(e.logs.String(), launchLog); got != wantLaunches {
+		t.Errorf("el log tiene %d veces %q y se esperaban %d:\n%s", got, launchLog, wantLaunches, e.logs.String())
+	}
+}
+
+func TestRunSupervisorEsperaAlMantenimiento(t *testing.T) {
+	fastMaintenancePoll(t)
+	env := newSupervisorEnv(t)
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	env.pauseAndResume(t, errc, "arrancado en primer plano", 2)
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+	// Lo lanzó él otra vez, así que lo para al salir.
+	if env.running(t) {
+		t.Error("PostgreSQL sigue en marcha tras cancelar: no era hijo del supervisor")
+	}
+}
+
+func TestRunSupervisorConPgCtlEsperaAlMantenimiento(t *testing.T) {
+	usePgCtlMode(t)
+	fastMaintenancePoll(t)
+	env := newSupervisorEnv(t)
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	env.pauseAndResume(t, errc, "arrancado con pg_ctl", 2)
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+}
+
+func TestRunSupervisorConPostgresExternoEsperaAlMantenimiento(t *testing.T) {
+	old := pgWatchInterval
+	pgWatchInterval = 200 * time.Millisecond
+	t.Cleanup(func() { pgWatchInterval = old })
+	fastMaintenancePoll(t)
+
+	env := newSupervisorEnv(t)
+	ctx, cancelSetup := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelSetup()
+	if err := env.cluster.EnsureRunning(ctx); err != nil {
+		t.Fatalf("EnsureRunning falló: %v", err)
+	}
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	// It adopted the external PostgreSQL; after the pause it launches its own.
+	env.pauseAndResume(t, errc, "arrancado en primer plano", 1)
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+}
+
+func TestRunSupervisorLatido(t *testing.T) {
+	env := newSupervisorEnv(t)
+	if env.cluster.SupervisorActive() {
+		t.Fatal("antes de arrancar no debería haber supervisor activo")
+	}
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	if !env.cluster.SupervisorActive() {
+		t.Error("con el supervisor en marcha, SupervisorActive debería ser true")
+	}
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+	if _, err := os.Stat(env.cfg.HeartbeatFile()); !os.IsNotExist(err) {
+		t.Errorf("el latido debería borrarse al salir (err = %v)", err)
+	}
+	if env.cluster.SupervisorActive() {
+		t.Error("tras salir, SupervisorActive debería ser false")
+	}
+}
+
+// execSQL runs one statement on the "lodan" database of the test cluster.
+func (e *supervisorEnv) execSQL(t *testing.T, query string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dsn, err := e.cluster.DSN("lodan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := database.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("no se pudo conectar: %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, query); err != nil {
+		t.Fatalf("%s falló: %v", query, err)
+	}
+}
+
+// countRows returns the result of a query that yields one integer.
+func (e *supervisorEnv) countRows(t *testing.T, query string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dsn, err := e.cluster.DSN("lodan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := database.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("no se pudo conectar: %v", err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(ctx, query).Scan(&n); err != nil {
+		t.Fatalf("%s falló: %v", query, err)
+	}
+	return n
+}
+
+// With the supervisor running, a backup and a restore leave it alive and PostgreSQL running as
+// its own child (so stopping the supervisor stops PostgreSQL).
+func TestRunSupervisorSobreviveABackupYRestore(t *testing.T) {
+	fastMaintenancePoll(t)
+	env := newSupervisorEnv(t)
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	ctx, cancelOps := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelOps()
+	dir := t.TempDir()
+	const launched = "arrancado en primer plano"
+
+	env.execSQL(t, "CREATE TABLE maint (step text)")
+	env.execSQL(t, "INSERT INTO maint VALUES ('antes')")
+
+	path, err := env.cluster.Backup(ctx, dir, database.BackupFull)
+	if err != nil {
+		t.Fatalf("Backup con el supervisor en marcha falló: %v\nlog:\n%s", err, env.logs.String())
+	}
+	assertAlive(t, env, errc)
+	if !env.running(t) {
+		t.Fatal("PostgreSQL debería estar en marcha tras el backup")
+	}
+	if got := strings.Count(env.logs.String(), launched); got != 2 {
+		t.Errorf("tras el backup el supervisor debería haber lanzado PostgreSQL 2 veces y son %d:\n%s", got, env.logs.String())
+	}
+
+	env.execSQL(t, "INSERT INTO maint VALUES ('despues')")
+	previous, err := env.cluster.Restore(ctx, []string{path})
+	if err != nil {
+		t.Fatalf("Restore con el supervisor en marcha falló: %v\nlog:\n%s", err, env.logs.String())
+	}
+	if previous != "" {
+		if err := os.RemoveAll(previous); err != nil {
+			t.Errorf("no se pudo borrar %s: %v", previous, err)
+		}
+	}
+	assertAlive(t, env, errc)
+	if !env.running(t) {
+		t.Fatal("PostgreSQL debería estar en marcha tras la restauración")
+	}
+	if got := strings.Count(env.logs.String(), launched); got != 3 {
+		t.Errorf("tras la restauración el supervisor debería haber lanzado PostgreSQL 3 veces y son %d:\n%s", got, env.logs.String())
+	}
+	env.awaitMigrated(t, errc)
+	if n := env.countRows(t, "SELECT count(*)::int FROM maint"); n != 1 {
+		t.Errorf("tras restaurar maint debería tener 1 fila (la anterior al backup) y tiene %d", n)
+	}
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+	if env.running(t) {
+		t.Error("PostgreSQL sigue en marcha tras parar el supervisor: no lo gestionaba él")
+	}
+}
+
 func TestRunSupervisorFallaSiElPostgresExternoSePara(t *testing.T) {
 	old := pgWatchInterval
 	pgWatchInterval = 200 * time.Millisecond

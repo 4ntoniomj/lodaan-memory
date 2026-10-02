@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -59,6 +60,71 @@ var (
 	pgCtlPollInterval = 10 * time.Second
 )
 
+// errMaintenancePause is returned by watch when PostgreSQL stopped while the cluster lock was held:
+// a backup or a restore is working on it, which is not a failure of the service.
+var errMaintenancePause = errors.New("PostgreSQL parado por una operación de mantenimiento")
+
+// maintenanceMessage is logged when a maintenance pause starts.
+const maintenanceMessage = "PostgreSQL parado por una operación de mantenimiento (backup o restauración): se espera a que termine"
+
+// maintenancePollInterval is how often a maintenance pause checks whether the lock is released.
+// A variable so the tests can shorten it.
+var maintenancePollInterval = 500 * time.Millisecond
+
+// startHeartbeat touches cfg.HeartbeatFile now and every database.SupervisorHeartbeatInterval
+// until the returned function is called, which also removes the file.
+func startHeartbeat(cfg config.Config, logger *log.Logger) (stop func()) {
+	path := cfg.HeartbeatFile()
+	failed := false
+	touch := func() {
+		err := os.MkdirAll(cfg.DataDir, 0o700)
+		if err == nil {
+			err = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+		}
+		if err != nil && !failed {
+			failed = true // once: this repeats every few seconds
+			logger.Printf("no se pudo escribir el latido del supervisor %s (backup y restauración no podrán devolverle PostgreSQL): %v", path, err)
+		}
+	}
+	touch()
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(database.SupervisorHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				touch()
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+			_ = os.Remove(path)
+		})
+	}
+}
+
+// waitMaintenanceDone blocks until the cluster lock is not held (nil) or ctx is done (its error).
+func waitMaintenanceDone(ctx context.Context, cluster *database.Cluster) error {
+	for cluster.LockHeld() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(maintenancePollInterval):
+		}
+	}
+	return ctx.Err()
+}
+
 // RunSupervisor is the body of the system service (`lodan service run`). It prepares the
 // cluster, keeps PostgreSQL running in the foreground as a child process (systemd, launchd
 // and the Windows SCM need a process that does not daemonize), applies the migrations and runs
@@ -70,6 +136,11 @@ var (
 // If PostgreSQL was already running on the same data directory (started with `lodan db start`
 // or by the lazy start of `lodan serve`), no second one is launched: only the maintenance runs,
 // and the state is checked every 30 seconds.
+//
+// While it runs it touches the heartbeat file (config.Config.HeartbeatFile) every 5 seconds and
+// removes it on exit. When PostgreSQL stops while the cluster lock is held (a backup or a restore
+// stops it under that lock), the supervisor does not fail: it waits for the lock to be released
+// and then prepares the cluster again, so PostgreSQL ends up as its own child again.
 func RunSupervisor(ctx context.Context, cfg config.Config, logger *log.Logger) error {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
@@ -79,9 +150,27 @@ func RunSupervisor(ctx context.Context, cfg config.Config, logger *log.Logger) e
 		return err
 	}
 
-	pg, err := prepareCluster(ctx, cfg, cluster, logger)
-	if err == nil {
-		err = superviseStack(ctx, cfg, cluster, pg, logger)
+	// The heartbeat tells backup and restore that PostgreSQL must be handed back to this
+	// supervisor, also while it waits out a maintenance pause.
+	stopHeartbeat := startHeartbeat(cfg, logger)
+	defer stopHeartbeat()
+
+	var pg *postgresProc
+	for {
+		pg, err = prepareCluster(ctx, cfg, cluster, logger)
+		if err == nil {
+			err = superviseStack(ctx, cfg, cluster, pg, logger)
+		}
+		if !errors.Is(err, errMaintenancePause) || ctx.Err() != nil {
+			break
+		}
+		// A backup or restore stopped PostgreSQL under the cluster lock: wait for the lock to
+		// be released and then prepare the cluster again (adopting a PostgreSQL that is already
+		// running, or launching it as before).
+		if err = waitMaintenanceDone(ctx, cluster); err != nil {
+			break
+		}
+		logger.Printf("la operación de mantenimiento ha terminado: se vuelve a preparar PostgreSQL")
 	}
 	// An error that arrives once ctx is done is the shutdown itself (commands killed, waits
 	// interrupted), not a failure.
@@ -203,13 +292,19 @@ func superviseStack(ctx context.Context, cfg config.Config, cluster *database.Cl
 }
 
 // watch blocks until ctx is done (nil) or PostgreSQL stops (error). For the process launched
-// by the supervisor it waits for it to exit; for an external one it polls its status.
+// by the supervisor it waits for it to exit (or, with pg_ctl, for its watcher to notice); for an
+// external one it polls its status. If PostgreSQL stopped while the cluster lock is held, a backup
+// or restore is working on it: that is not a failure, and errMaintenancePause is returned.
 func watch(ctx context.Context, cluster *database.Cluster, pg *postgresProc, logger *log.Logger) error {
 	if pg != nil {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-pg.done:
+			if cluster.LockHeld() {
+				logger.Print(maintenanceMessage)
+				return errMaintenancePause
+			}
 			return fmt.Errorf("PostgreSQL terminó por su cuenta (%v): revisa %s", pg.err, pg.logPath)
 		}
 	}
@@ -229,6 +324,10 @@ func watch(ctx context.Context, cluster *database.Cluster, pg *postgresProc, log
 				continue
 			}
 			if !running {
+				if cluster.LockHeld() {
+					logger.Print(maintenanceMessage)
+					return errMaintenancePause
+				}
 				return errors.New("el PostgreSQL externo se ha parado: el gestor de servicios reiniciará el servicio, que lo lanzará en primer plano")
 			}
 		}
@@ -320,8 +419,11 @@ func startPostgresPgCtl(ctx context.Context, cluster *database.Cluster, cfg conf
 		logPath: filepath.Join(cfg.LogsDir(), "postgres.log"),
 		done:    make(chan struct{}),
 	}
+	// The interval is read before starting the goroutine: tests change pgCtlPollInterval and
+	// restore it in a cleanup, which would race with a read inside a watcher that outlives them.
+	interval := pgCtlPollInterval
 	go func() {
-		ticker := time.NewTicker(pgCtlPollInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
