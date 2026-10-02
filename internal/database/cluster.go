@@ -664,9 +664,10 @@ func (c *Cluster) startDetached(ctx context.Context) error {
 // error reports the restart failure together with a non-empty path.
 //
 // With the service supervisor active (SupervisorActive) PostgreSQL is not started by Backup, so
-// that it stays a child of the service: the lock is released and Backup waits (polling Status
-// every 500 ms, up to restartTimeout) for the supervisor to start it. If that does not happen it
-// starts PostgreSQL itself and returns an error saying so (the archive is still written).
+// that it stays a child of the service: the maintenance mark is created before stopping it, the
+// lock is released and Backup waits (polling Status every 500 ms, up to restartTimeout) for the
+// supervisor to start it, which removes the mark. If that does not happen it starts PostgreSQL
+// itself, removes the mark and returns an error saying so (the archive is still written).
 func (c *Cluster) Backup(ctx context.Context, destDir, backupType string) (path string, err error) {
 	kind, err := backupKind(backupType)
 	if err != nil {
@@ -788,9 +789,11 @@ func removeOrphanStaging(dir string) error {
 //
 // A failure to restart PostgreSQL is returned together with the (complete) snapshot.
 //
-// If PostgreSQL was running and the service supervisor is active (SupervisorActive), it is not
-// started here: *handoff is set to true and the caller, once the lock is released, waits for the
-// supervisor to start it (awaitSupervisorStart). This holds also if the copy failed.
+// If PostgreSQL was running and the service supervisor is active (SupervisorActive, checked before
+// stopping it), it is not started here: the maintenance mark is created (MarkMaintenancePending)
+// before stopping, *handoff is set to true and the caller, once the lock is released, waits for the
+// supervisor to start it (awaitSupervisorStart). This holds also if the copy failed. If PostgreSQL
+// is not handed over, the mark is removed before returning.
 func (c *Cluster) takeSnapshot(ctx context.Context, destDir, kind, pgReal string, handoff *bool) (snap *backupSnapshot, err error) {
 	unlock, err := c.Lock(ctx)
 	if err != nil {
@@ -826,15 +829,30 @@ func (c *Cluster) takeSnapshot(ctx context.Context, destDir, kind, pgReal string
 		return nil, err
 	}
 	if wasRunning {
+		supervised := c.SupervisorActive()
+		if supervised {
+			// Before stopping: the supervisor may notice the stop only after the lock is
+			// released (it polls), and then it needs the mark to tell this from a failure.
+			if err := c.MarkMaintenancePending(); err != nil {
+				return nil, err
+			}
+			// Runs after the restart function below (reverse order), still under the lock. The
+			// mark stays only if PostgreSQL is handed over to the supervisor, which removes it.
+			defer func() {
+				if !*handoff {
+					c.ClearMaintenancePending()
+				}
+			}()
+		}
 		if err := c.Stop(ctx); err != nil {
 			return nil, err
 		}
 		// Deferred functions run in reverse order: this one runs after the staging cleanup
 		// below and before the lock is released.
 		defer func() {
-			if c.SupervisorActive() {
-				// The supervisor saw PostgreSQL stop under our lock and is waiting for it
-				// to be released to start PostgreSQL again as its own child.
+			if supervised {
+				// The supervisor will see PostgreSQL stop (under our lock, or later thanks to
+				// the mark) and start it again as its own child once the lock is released.
 				*handoff = true
 				return
 			}
@@ -1499,11 +1517,13 @@ func validateRestoreChain(files []string) ([]backupInfo, error) {
 // are put back and an error is returned. PostgreSQL is left running.
 //
 // With the service supervisor active (SupervisorActive when the restore starts), PostgreSQL stays
-// under its management: the restore starts its own PostgreSQL and verifies it as above (still
-// under the lock), then stops it, releases the lock and waits (up to restartTimeout) for the
-// supervisor to start it again as its child. If it does not, Restore starts it itself and returns
-// an error saying so. The same hand-over applies when a failed restore went back to the previous
-// state with PostgreSQL having been running.
+// under its management: the restore creates the maintenance mark (MarkMaintenancePending) before
+// stopping PostgreSQL, starts its own PostgreSQL and verifies it as above (still under the lock),
+// then stops it, releases the lock and waits (up to restartTimeout) for the supervisor to start it
+// again as its child, which removes the mark. If it does not, Restore starts it itself, removes
+// the mark and returns an error saying so. The same hand-over applies when a failed restore went
+// back to the previous state with PostgreSQL having been running; if there is no hand-over the
+// mark is removed.
 func (c *Cluster) Restore(ctx context.Context, files []string) (previous string, err error) {
 	if len(files) == 0 {
 		return "", errors.New("no se ha indicado ningún backup que restaurar")
@@ -1535,6 +1555,19 @@ func (c *Cluster) restoreLocked(ctx context.Context, files []string, handoff *bo
 	wasRunning, err := c.Status(ctx)
 	if err != nil {
 		return "", err
+	}
+	if supervised {
+		// Before stopping PostgreSQL (see takeSnapshot). Removed on return unless PostgreSQL is
+		// handed over to the supervisor, which then removes it; the failure function below
+		// sets *handoff first because it is deferred later and so runs earlier.
+		if err := c.MarkMaintenancePending(); err != nil {
+			return "", err
+		}
+		defer func() {
+			if !*handoff {
+				c.ClearMaintenancePending()
+			}
+		}()
 	}
 	if wasRunning {
 		if err := c.Stop(ctx); err != nil {

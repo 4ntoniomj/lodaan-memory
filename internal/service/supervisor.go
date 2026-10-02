@@ -60,9 +60,17 @@ var (
 	pgCtlPollInterval = 10 * time.Second
 )
 
-// errMaintenancePause is returned by watch when PostgreSQL stopped while the cluster lock was held:
-// a backup or a restore is working on it, which is not a failure of the service.
+// errMaintenancePause is returned by watch when PostgreSQL stopped during a maintenance operation
+// (see maintenanceUnderway): a backup or a restore is working on it, which is not a failure of
+// the service.
 var errMaintenancePause = errors.New("PostgreSQL parado por una operación de mantenimiento")
+
+// maintenanceUnderway reports whether a backup or restore is stopping PostgreSQL on purpose: it
+// holds the cluster lock right now, or it left the maintenance mark to hand PostgreSQL over to us
+// (it may have already released the lock by the time a polling watcher notices the stop).
+func maintenanceUnderway(cluster *database.Cluster) bool {
+	return cluster.LockHeld() || cluster.MaintenancePending()
+}
 
 // maintenanceMessage is logged when a maintenance pause starts.
 const maintenanceMessage = "PostgreSQL parado por una operación de mantenimiento (backup o restauración): se espera a que termine"
@@ -139,8 +147,11 @@ func waitMaintenanceDone(ctx context.Context, cluster *database.Cluster) error {
 //
 // While it runs it touches the heartbeat file (config.Config.HeartbeatFile) every 5 seconds and
 // removes it on exit. When PostgreSQL stops while the cluster lock is held (a backup or a restore
-// stops it under that lock), the supervisor does not fail: it waits for the lock to be released
-// and then prepares the cluster again, so PostgreSQL ends up as its own child again.
+// stops it under that lock) or while the maintenance mark is there (they leave it when they hand
+// the restart over to the supervisor, which matters for the polling watchers: the lock may be
+// released before the next poll), the supervisor does not fail: it waits for the lock to be
+// released and then prepares the cluster again, so PostgreSQL ends up as its own child again, and
+// removes the mark once PostgreSQL is running.
 func RunSupervisor(ctx context.Context, cfg config.Config, logger *log.Logger) error {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
@@ -230,6 +241,9 @@ func prepareCluster(ctx context.Context, cfg config.Config, cluster *database.Cl
 	if err := cluster.EnsureDatabase(ctx, databaseName); err != nil {
 		return pg, err
 	}
+	// PostgreSQL is running: if a backup or restore handed it over to us, that is done. Removed
+	// under the lock, so it cannot erase the mark of an operation that starts right afterwards.
+	cluster.ClearMaintenancePending()
 	return pg, nil
 }
 
@@ -294,14 +308,15 @@ func superviseStack(ctx context.Context, cfg config.Config, cluster *database.Cl
 // watch blocks until ctx is done (nil) or PostgreSQL stops (error). For the process launched
 // by the supervisor it waits for it to exit (or, with pg_ctl, for its watcher to notice); for an
 // external one it polls its status. If PostgreSQL stopped while the cluster lock is held, a backup
-// or restore is working on it: that is not a failure, and errMaintenancePause is returned.
+// or restore is working on it (see maintenanceUnderway): that is not a failure, and
+// errMaintenancePause is returned.
 func watch(ctx context.Context, cluster *database.Cluster, pg *postgresProc, logger *log.Logger) error {
 	if pg != nil {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-pg.done:
-			if cluster.LockHeld() {
+			if maintenanceUnderway(cluster) {
 				logger.Print(maintenanceMessage)
 				return errMaintenancePause
 			}
@@ -324,7 +339,7 @@ func watch(ctx context.Context, cluster *database.Cluster, pg *postgresProc, log
 				continue
 			}
 			if !running {
-				if cluster.LockHeld() {
+				if maintenanceUnderway(cluster) {
 					logger.Print(maintenanceMessage)
 					return errMaintenancePause
 				}

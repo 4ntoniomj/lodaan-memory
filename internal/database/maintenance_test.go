@@ -54,6 +54,51 @@ func TestSupervisorActive(t *testing.T) {
 	}
 }
 
+func TestMaintenancePending(t *testing.T) {
+	cl := newBareCluster(t)
+	path := cl.cfg.MaintenanceFile()
+
+	if cl.MaintenancePending() {
+		t.Error("sin marca no hay mantenimiento pendiente")
+	}
+	cl.ClearMaintenancePending() // does nothing, without error
+
+	if err := cl.MarkMaintenancePending(); err != nil {
+		t.Fatalf("MarkMaintenancePending falló: %v", err)
+	}
+	if !cl.MaintenancePending() {
+		t.Error("una marca recién creada debería contar como mantenimiento pendiente")
+	}
+	if data, err := os.ReadFile(path); err != nil || len(data) == 0 {
+		t.Errorf("la marca debería contener la hora de creación (data = %q, err = %v)", data, err)
+	}
+
+	setAge(t, path, maintenancePendingMaxAge-10*time.Second)
+	if !cl.MaintenancePending() {
+		t.Error("una marca por debajo del máximo debería contar")
+	}
+	// An abandoned mark (its creator died) is ignored.
+	setAge(t, path, maintenancePendingMaxAge+10*time.Second)
+	if cl.MaintenancePending() {
+		t.Error("una marca caducada no debería contar como mantenimiento pendiente")
+	}
+	// Marking again renews it.
+	if err := cl.MarkMaintenancePending(); err != nil {
+		t.Fatal(err)
+	}
+	if !cl.MaintenancePending() {
+		t.Error("volver a marcar debería renovar la marca caducada")
+	}
+
+	cl.ClearMaintenancePending()
+	if cl.MaintenancePending() {
+		t.Error("tras borrar la marca no debería haber mantenimiento pendiente")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("la marca debería haberse borrado (err = %v)", err)
+	}
+}
+
 func TestLockHeld(t *testing.T) {
 	cl := newBareCluster(t)
 	ctx := backupCtx(t)

@@ -428,6 +428,143 @@ func TestRunSupervisorConPostgresExternoEsperaAlMantenimiento(t *testing.T) {
 	}
 }
 
+// awaitMarkGone waits for the supervisor to remove the maintenance mark.
+func (e *supervisorEnv) awaitMarkGone(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(e.cfg.MaintenanceFile()); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("el supervisor no borró la marca de mantenimiento\nlog:\n%s", e.logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// handOverStop does what a backup does when it hands PostgreSQL over to the supervisor: it leaves
+// the maintenance mark, takes the lock, stops PostgreSQL and releases the lock right away,
+// before a supervisor that polls slowly can notice anything.
+func (e *supervisorEnv) handOverStop(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := e.cluster.MarkMaintenancePending(); err != nil {
+		t.Fatalf("no se pudo crear la marca de mantenimiento: %v", err)
+	}
+	unlock, err := e.cluster.Lock(ctx)
+	if err != nil {
+		t.Fatalf("no se pudo tomar el lock del clúster: %v", err)
+	}
+	defer unlock()
+	if err := e.cluster.Stop(ctx); err != nil {
+		t.Fatalf("no se pudo parar PostgreSQL: %v", err)
+	}
+	unlock()
+}
+
+// assertResumedAfterHandOver checks the outcome of handOverStop with a slow poll: the supervisor
+// did not fail, PostgreSQL is running again, the mark is gone and the supervisor launched
+// PostgreSQL wantLaunches times (launchLog is its log line).
+func (e *supervisorEnv) assertResumedAfterHandOver(t *testing.T, errc <-chan error, launchLog string, wantLaunches int) {
+	t.Helper()
+	e.awaitMigrated(t, errc) // fails if RunSupervisor returned
+	assertAlive(t, e, errc)
+	if !e.running(t) {
+		t.Fatal("PostgreSQL debería estar en marcha tras el mantenimiento")
+	}
+	if !strings.Contains(e.logs.String(), "parado por una operación de mantenimiento") {
+		t.Errorf("el log no registra la pausa de mantenimiento:\n%s", e.logs.String())
+	}
+	e.awaitMarkGone(t)
+	if got := strings.Count(e.logs.String(), launchLog); got != wantLaunches {
+		t.Errorf("el log tiene %d veces %q y se esperaban %d:\n%s", got, launchLog, wantLaunches, e.logs.String())
+	}
+}
+
+// The real case on Windows: the lock is released long before the next poll of the supervisor,
+// and only the maintenance mark tells it that PostgreSQL was stopped on purpose.
+func TestRunSupervisorConPostgresExternoYSondeoLentoUsaLaMarca(t *testing.T) {
+	old := pgWatchInterval
+	pgWatchInterval = 3 * time.Second
+	t.Cleanup(func() { pgWatchInterval = old })
+	fastMaintenancePoll(t)
+
+	env := newSupervisorEnv(t)
+	ctx, cancelSetup := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelSetup()
+	if err := env.cluster.EnsureRunning(ctx); err != nil {
+		t.Fatalf("EnsureRunning falló: %v", err)
+	}
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	env.handOverStop(t)
+	// It adopted the external PostgreSQL; after the pause it launches its own.
+	env.assertResumedAfterHandOver(t, errc, "arrancado en primer plano", 1)
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+}
+
+func TestRunSupervisorConPgCtlYSondeoLentoUsaLaMarca(t *testing.T) {
+	usePgCtlMode(t)
+	pgCtlPollInterval = 3 * time.Second // restored by the cleanup of usePgCtlMode
+	fastMaintenancePoll(t)
+	env := newSupervisorEnv(t)
+	cancel, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	env.handOverStop(t)
+	env.assertResumedAfterHandOver(t, errc, "arrancado con pg_ctl", 2)
+
+	cancel()
+	if err := awaitExit(t, errc, 60*time.Second); err != nil {
+		t.Fatalf("RunSupervisor devolvió error al cancelarse: %v", err)
+	}
+}
+
+// A mark that nobody renewed (its creator died) must not hide a real failure.
+func TestRunSupervisorIgnoraUnaMarcaCaducadaSinLock(t *testing.T) {
+	old := pgWatchInterval
+	pgWatchInterval = 200 * time.Millisecond
+	t.Cleanup(func() { pgWatchInterval = old })
+
+	env := newSupervisorEnv(t)
+	ctx, cancelSetup := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelSetup()
+	if err := env.cluster.EnsureRunning(ctx); err != nil {
+		t.Fatalf("EnsureRunning falló: %v", err)
+	}
+	_, errc := env.start(t)
+	env.awaitMigrated(t, errc)
+
+	if err := env.cluster.MarkMaintenancePending(); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(env.cfg.MaintenanceFile(), expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	if env.cluster.MaintenancePending() {
+		t.Fatal("precondición: la marca debería estar caducada")
+	}
+	if err := env.cluster.Stop(ctx); err != nil {
+		t.Fatalf("no se pudo parar el PostgreSQL externo: %v", err)
+	}
+
+	err := awaitExit(t, errc, 30*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "se ha parado") {
+		t.Fatalf("con la marca caducada y sin lock se esperaba el fallo de siempre, y es: %v", err)
+	}
+	if strings.Contains(env.logs.String(), "parado por una operación de mantenimiento") {
+		t.Errorf("el supervisor trató como mantenimiento una marca caducada:\n%s", env.logs.String())
+	}
+}
+
 func TestRunSupervisorLatido(t *testing.T) {
 	env := newSupervisorEnv(t)
 	if env.cluster.SupervisorActive() {
@@ -515,6 +652,7 @@ func TestRunSupervisorSobreviveABackupYRestore(t *testing.T) {
 	if !env.running(t) {
 		t.Fatal("PostgreSQL debería estar en marcha tras el backup")
 	}
+	env.awaitMarkGone(t) // the supervisor removes it once PostgreSQL is up again
 	if got := strings.Count(env.logs.String(), launched); got != 2 {
 		t.Errorf("tras el backup el supervisor debería haber lanzado PostgreSQL 2 veces y son %d:\n%s", got, env.logs.String())
 	}
@@ -533,6 +671,7 @@ func TestRunSupervisorSobreviveABackupYRestore(t *testing.T) {
 	if !env.running(t) {
 		t.Fatal("PostgreSQL debería estar en marcha tras la restauración")
 	}
+	env.awaitMarkGone(t)
 	if got := strings.Count(env.logs.String(), launched); got != 3 {
 		t.Errorf("tras la restauración el supervisor debería haber lanzado PostgreSQL 3 veces y son %d:\n%s", got, env.logs.String())
 	}

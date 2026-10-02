@@ -17,7 +17,43 @@ const (
 	// supervisorStartPoll is how often a backup or restore checks whether the supervisor has
 	// started PostgreSQL again.
 	supervisorStartPoll = 500 * time.Millisecond
+	// maintenancePendingMaxAge is how old the maintenance mark can be to count: the longest a
+	// backup or restore waits for the supervisor (restartTimeout) plus a margin. An older mark is
+	// abandoned (its creator died) and ignored.
+	maintenancePendingMaxAge = restartTimeout + 30*time.Second
 )
+
+// MarkMaintenancePending creates (or renews) the maintenance mark, config.Config.MaintenanceFile:
+// a backup or restore that is going to stop PostgreSQL and hand its restart over to the service
+// supervisor leaves it, under the cluster lock and before stopping PostgreSQL. The supervisor may
+// notice the stop only after the lock is released (it polls PostgreSQL every few seconds), and the
+// mark is what tells it, then, that this is a maintenance pause and not a failure. The file holds
+// the creation time; its modification time is what MaintenancePending checks.
+func (c *Cluster) MarkMaintenancePending() error {
+	if err := os.MkdirAll(c.cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("no se pudo crear el directorio de datos %s: %w", c.cfg.DataDir, err)
+	}
+	path := c.cfg.MaintenanceFile()
+	if err := os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("no se pudo crear la marca de mantenimiento %s: %w", path, err)
+	}
+	return nil
+}
+
+// ClearMaintenancePending removes the maintenance mark. It does nothing if it is not there.
+// The supervisor calls it, under the cluster lock, once PostgreSQL is running again; a backup or
+// restore calls it when it does not hand PostgreSQL over or when it had to start it itself.
+func (c *Cluster) ClearMaintenancePending() {
+	_ = os.Remove(c.cfg.MaintenanceFile())
+}
+
+// MaintenancePending reports whether the maintenance mark exists and is younger than
+// maintenancePendingMaxAge. Together with LockHeld it tells the supervisor that a PostgreSQL that
+// is not running was stopped on purpose.
+func (c *Cluster) MaintenancePending() bool {
+	info, err := os.Stat(c.cfg.MaintenanceFile())
+	return err == nil && time.Since(info.ModTime()) < maintenancePendingMaxAge
+}
 
 // SupervisorActive reports whether the service supervisor (`lodan service run`) is alive: its
 // heartbeat file exists and was touched less than supervisorHeartbeatMaxAge ago. A backup or a
@@ -69,6 +105,8 @@ func (c *Cluster) startAfterSupervisorFailed(ctx context.Context, why string) er
 	if unlock, err := c.Lock(bctx); err == nil {
 		defer unlock()
 	}
+	// Whatever the outcome, nobody is going to hand PostgreSQL over any more.
+	defer c.ClearMaintenancePending()
 	if err := c.Start(bctx); err != nil {
 		return fmt.Errorf("el servicio de lodan debía arrancar PostgreSQL y %s, y tampoco se pudo arrancar a mano: %w", why, err)
 	}

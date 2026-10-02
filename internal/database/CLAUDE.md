@@ -17,7 +17,7 @@
 ## Convenciones específicas
 
 - Las migraciones nunca se editan una vez fusionadas: siempre se añade una nueva.
-- Backup y Restore toman el lock del clúster antes de parar PostgreSQL y, si hay supervisor activo (`SupervisorActive`), le ceden el rearranque: no cambies ese orden sin revisar `internal/service/supervisor.go`.
+- Backup y Restore toman el lock del clúster antes de parar PostgreSQL y, si hay supervisor activo (`SupervisorActive`), le ceden el rearranque (con la marca `maintenance.pending`, creada bajo el lock y antes de parar PostgreSQL, para que un supervisor que sondea no confunda la parada con un fallo): no cambies ese orden sin revisar `internal/service/supervisor.go`.
 
 ## Pruebas
 

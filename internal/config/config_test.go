@@ -279,7 +279,8 @@ func TestRutas(t *testing.T) {
 		c.LogsDir():    "/datos/logs",
 		c.LockFile():   "/datos/lodan.lock",
 
-		c.HeartbeatFile(): "/datos/supervisor.heartbeat",
+		c.HeartbeatFile():   "/datos/supervisor.heartbeat",
+		c.MaintenanceFile(): "/datos/maintenance.pending",
 	}
 	if isWindows() {
 		t.Skip("las rutas esperadas usan separador Unix")

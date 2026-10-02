@@ -53,3 +53,7 @@ func (c Config) LockFile() string { return filepath.Join(c.DataDir, "lodan.lock"
 // HeartbeatFile is the path of the file that the service supervisor touches while it is alive,
 // so that a backup or restore knows it must hand PostgreSQL back to it.
 func (c Config) HeartbeatFile() string { return filepath.Join(c.DataDir, "supervisor.heartbeat") }
+
+// MaintenanceFile is the path of the mark that a backup or restore leaves while it hands the
+// restart of PostgreSQL over to the service supervisor (see Cluster.MarkMaintenancePending).
+func (c Config) MaintenanceFile() string { return filepath.Join(c.DataDir, "maintenance.pending") }
