@@ -81,18 +81,20 @@ func populateEnv(t *testing.T, r Runtime) {
 }
 
 // mambaServer serves a fake micromamba binary and its .sha256 for the
-// platform of r, and points micromambaBase to it.
+// platform of r, and points micromambaBase to it. The .sha256 is served
+// without the .exe suffix on Windows (matching the real release).
 func mambaServer(t *testing.T, r Runtime) *atomic.Int32 {
 	t.Helper()
 	plat, err := Platform(r.osName(), r.archName())
 	if err != nil {
 		t.Fatal(err)
 	}
-	file := "micromamba-" + plat + exeSuffix(r.osName())
+	base := "micromamba-" + plat
+	file := base + exeSuffix(r.osName())
 	const content = "binario falso de micromamba"
 	files := map[string]string{}
 	files["/"+file] = content
-	files["/"+file+".sha256"] = sumHex(content) + "  " + file + "\n"
+	files["/"+base+".sha256"] = sumHex(content) + "  " + file + "\n"
 	srv, hits := serveFiles(t, files)
 	old := micromambaBase
 	micromambaBase = srv.URL

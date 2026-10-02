@@ -128,8 +128,11 @@ func (r Runtime) EnsureMicromamba(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	url := micromambaBase + "/micromamba-" + plat + exeSuffix(r.osName())
-	want, err := fetchSHA256(ctx, url+".sha256")
+	// The release publishes the checksum without the .exe suffix on Windows
+	// (micromamba-win-64.exe and micromamba-win-64.sha256).
+	base := micromambaBase + "/micromamba-" + plat
+	url := base + exeSuffix(r.osName())
+	want, err := fetchSHA256(ctx, base+".sha256")
 	if err != nil {
 		return "", fmt.Errorf("no se pudo obtener la suma de verificación de micromamba: %w", err)
 	}
