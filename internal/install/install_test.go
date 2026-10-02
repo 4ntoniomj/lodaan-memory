@@ -252,6 +252,11 @@ func newHarness(t *testing.T, stdin string) *harness {
 			t.Fatal(err)
 		}
 	}
+	// Claude Code counts as installed only with ~/.claude.json (or the CLI), not
+	// with the ~/.claude folder alone.
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	exe := filepath.Join(t.TempDir(), "lodan-origen")
 	if err := os.WriteFile(exe, []byte("binario de prueba\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -534,9 +539,10 @@ func TestInstallOpcionesSkip(t *testing.T) {
 		if err := h.install(Options{Yes: true, SkipClients: true}); err != nil {
 			t.Fatalf("Install: %v\n%s", err, h.output())
 		}
+		// The harness already has ~/.claude.json (empty): it must not gain the entry.
 		for _, p := range []string{".cursor/mcp.json", ".codex/config.toml", ".claude.json"} {
-			if pathExists(filepath.Join(h.home, filepath.FromSlash(p))) {
-				t.Errorf("con --skip-clients no debe crearse %s", p)
+			if fileHas(filepath.Join(h.home, filepath.FromSlash(p)), h.bin()) {
+				t.Errorf("con --skip-clients no debe configurarse %s", p)
 			}
 		}
 		if !strings.Contains(h.output(), "--skip-clients") {
@@ -556,7 +562,7 @@ func TestInstallOnlyLimitaLosClientes(t *testing.T) {
 	if !fileHas(filepath.Join(h.home, ".cursor", "mcp.json"), h.bin()) {
 		t.Error("Cursor debe configurarse")
 	}
-	if pathExists(filepath.Join(h.home, ".codex", "config.toml")) || pathExists(filepath.Join(h.home, ".claude.json")) {
+	if pathExists(filepath.Join(h.home, ".codex", "config.toml")) || fileHas(filepath.Join(h.home, ".claude.json"), h.bin()) {
 		t.Error("con --only cursor no se toca ningún otro cliente")
 	}
 }

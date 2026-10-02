@@ -18,6 +18,7 @@
 
 - Todo efecto externo pasa por un campo inyectable de `Installer`: los tests nunca descargan, elevan ni tocan el HOME real.
 - Ningún archivo de un cliente se crea si no existe la carpeta de su app; siempre copia `.bak-lodan` y escritura atómica.
+- Claude Code se considera instalado solo si existe `~/.claude.json` o el CLI `claude` está en el PATH, no por la carpeta `~/.claude` (la crea el propio instalador al copiar la skill). El bloque de `~/.claude/CLAUDE.md` solo se escribe y comprueba con Claude Code detectado; al desinstalar se retira siempre, y `~/.claude` (y `skills/`) se borran solo si quedan totalmente vacías.
 - `--dry-run` no escribe, no descarga y no eleva.
 
 ## Pruebas

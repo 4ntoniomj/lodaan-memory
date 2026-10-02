@@ -19,9 +19,19 @@ func skFS() fstest.MapFS {
 	return fsys
 }
 
+// skEnv returns an environment with a temporary HOME and no `claude` CLI on
+// the PATH. Claude Code only counts as installed if the test writes
+// ~/.claude.json (see skClaudeCode).
 func skEnv(t *testing.T) Env {
 	t.Helper()
+	clStubCLI(t, "", nil)
 	return Env{GOOS: runtime.GOOS, Home: t.TempDir()}
+}
+
+// skClaudeCode makes detectClaudeCode(env) true by creating ~/.claude.json.
+func skClaudeCode(t *testing.T, env Env) {
+	t.Helper()
+	clWrite(t, filepath.Join(env.Home, ".claude.json"), "{}\n")
 }
 
 func TestSkillInstalaYRetiraLaAntigua(t *testing.T) {
@@ -231,6 +241,7 @@ func TestCheckInstructions(t *testing.T) {
 
 	// The hand-written section counts as present in CLAUDE.md.
 	env2 := skEnv(t)
+	skClaudeCode(t, env2)
 	clWrite(t, filepath.Join(env2.Home, ".claude", "CLAUDE.md"), "# Mío\n\n## Memoria persistente: lodan\n\n- regla\n")
 	if ok, detail := CheckInstructions(env2); !ok {
 		t.Fatalf("la sección manual cuenta como presente: %q", detail)
@@ -266,6 +277,7 @@ func skBlock() string {
 
 func TestInstruccionesAnadirSustituirYQuitar(t *testing.T) {
 	env := skEnv(t)
+	skClaudeCode(t, env)
 	codex := filepath.Join(env.Home, ".codex", "AGENTS.md")
 	claude := filepath.Join(env.Home, ".claude", "CLAUDE.md")
 	gemini := filepath.Join(env.Home, ".gemini", "GEMINI.md")
@@ -352,6 +364,7 @@ func TestInstruccionesAnadirSustituirYQuitar(t *testing.T) {
 
 func TestInstruccionesSeccionManualEnClaude(t *testing.T) {
 	env := skEnv(t)
+	skClaudeCode(t, env)
 	claude := filepath.Join(env.Home, ".claude", "CLAUDE.md")
 	codex := filepath.Join(env.Home, ".codex", "AGENTS.md")
 	manual := "# Mío\n\n## Memoria persistente: lodan\n\n- regla manual\n"
@@ -392,6 +405,169 @@ func TestInstruccionesSinCarpetaNoCreaNada(t *testing.T) {
 		if pathExists(filepath.Join(env.Home, d)) {
 			t.Fatalf("no debe crearse ~/%s", d)
 		}
+	}
+}
+
+func TestClaudeCodeNoSeDetectaSoloPorLaCarpeta(t *testing.T) {
+	env := skEnv(t)
+	if err := os.MkdirAll(filepath.Join(env.Home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if detectClaudeCode(env) {
+		t.Fatal("la carpeta ~/.claude por sí sola no debe contar como Claude Code instalado")
+	}
+	for _, c := range DetectClients(env) {
+		if c.ID == "claude-code" {
+			t.Fatal("claude-code no debe detectarse solo con ~/.claude")
+		}
+	}
+	skClaudeCode(t, env)
+	if !detectClaudeCode(env) {
+		t.Fatal("con ~/.claude.json Claude Code sí está instalado")
+	}
+}
+
+func TestSkillSinClaudeCodeNoEscribeInstrucciones(t *testing.T) {
+	env := skEnv(t)
+	if _, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false); err != nil {
+		t.Fatal(err)
+	}
+	// The skill creates ~/.claude, which must not make lodan think that
+	// Claude Code is installed.
+	if !pathExists(filepath.Join(env.Home, ".claude", "skills", skillName, "SKILL.md")) {
+		t.Fatal("la skill debe instalarse siempre en ~/.claude/skills")
+	}
+	report, err := InstallInstructions(env, false)
+	if err != nil || len(report) != 0 {
+		t.Fatalf("sin Claude Code no hay instrucciones que escribir: %v %v", report, err)
+	}
+	if pathExists(filepath.Join(env.Home, ".claude", "CLAUDE.md")) {
+		t.Fatal("no debe escribirse ~/.claude/CLAUDE.md sin Claude Code")
+	}
+	if ok, detail := CheckInstructions(env); !ok || !strings.Contains(detail, "no hay carpetas") {
+		t.Fatalf("doctor no debe exigir el bloque sin Claude Code: %v %q", ok, detail)
+	}
+}
+
+func TestInstruccionesConClaudeCodeSinCarpetaCreanLaCarpeta(t *testing.T) {
+	env := skEnv(t)
+	skClaudeCode(t, env)
+	if _, err := InstallInstructions(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if !fileHas(filepath.Join(env.Home, ".claude", "CLAUDE.md"), instructionsStart) {
+		t.Fatal("con Claude Code detectado debe escribirse el bloque aunque ~/.claude no exista")
+	}
+}
+
+func TestDesinstalarQuitaLaCarpetaClaudeSiLaCreoLodan(t *testing.T) {
+	env := skEnv(t)
+	if _, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false); err != nil {
+		t.Fatal(err)
+	}
+	// Dry run: nothing is removed.
+	if _, err := UninstallSkill(env, true); err != nil || !pathExists(filepath.Join(env.Home, ".claude", "skills", skillName)) {
+		t.Fatalf("el dry run no debe tocar nada: %v", err)
+	}
+	report, err := UninstallInstructions(env, false)
+	if err != nil || len(report) != 0 {
+		t.Fatalf("UninstallInstructions: %v %v", report, err)
+	}
+	report, err = UninstallSkill(env, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(report, "\n"), "carpeta vacía retirada") {
+		t.Fatalf("debe informar de la carpeta vacía retirada: %v", report)
+	}
+	if pathExists(filepath.Join(env.Home, ".claude")) {
+		t.Fatal("~/.claude debe desaparecer: la creó lodan y quedó vacía")
+	}
+}
+
+func TestDesinstalarQuitaClaudeTrasRetirarSkillEInstrucciones(t *testing.T) {
+	env := skEnv(t)
+	skClaudeCode(t, env)
+	if _, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallInstructions(env, false); err != nil {
+		t.Fatal(err)
+	}
+	// Same order as lodan uninstall: instructions first, then the skill.
+	if _, err := UninstallInstructions(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(filepath.Join(env.Home, ".claude", "skills", skillName)) {
+		t.Fatal("la skill sigue ahí hasta que se retira")
+	}
+	if _, err := UninstallSkill(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(filepath.Join(env.Home, ".claude")) {
+		t.Fatal("~/.claude debe desaparecer")
+	}
+	if !pathExists(filepath.Join(env.Home, ".claude.json")) {
+		t.Fatal("~/.claude.json no es de lodan y no debe borrarse")
+	}
+}
+
+func TestDesinstalarNoBorraClaudeConContenidoAjeno(t *testing.T) {
+	env := skEnv(t)
+	settings := filepath.Join(env.Home, ".claude", "settings.json")
+	clWrite(t, settings, "{}\n")
+	if _, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UninstallSkill(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(settings) {
+		t.Fatal("~/.claude con contenido ajeno no se debe borrar")
+	}
+	if pathExists(filepath.Join(env.Home, ".claude", "skills")) {
+		t.Fatal("skills/ quedó vacía y debe retirarse")
+	}
+
+	// Another skill inside skills/ keeps the folder, and so ~/.claude.
+	env = skEnv(t)
+	other := filepath.Join(env.Home, ".claude", "skills", "otra-skill", "SKILL.md")
+	clWrite(t, other, "ajena\n")
+	if _, err := InstallSkill(skFS(), env, filepath.Join(t.TempDir(), "backups"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UninstallSkill(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if !pathExists(other) {
+		t.Fatal("no se debe tocar otras skills ni sus carpetas")
+	}
+}
+
+func TestDesinstalarQuitaElBloqueAunqueNoSeDetecteClaudeCode(t *testing.T) {
+	env := skEnv(t)
+	claude := filepath.Join(env.Home, ".claude", "CLAUDE.md")
+	clWrite(t, claude, "# Mío\n\n"+skBlock()+"\n")
+	if detectClaudeCode(env) {
+		t.Fatal("precondición: Claude Code no debe detectarse")
+	}
+	report, err := UninstallInstructions(env, false)
+	if err != nil || len(report) != 1 {
+		t.Fatalf("UninstallInstructions: %v %v", report, err)
+	}
+	if clRead(t, claude) != "# Mío\n" {
+		t.Fatalf("CLAUDE.md no se restauró:\n%q", clRead(t, claude))
+	}
+
+	// A file that only held the block is deleted, and ~/.claude with it.
+	env = skEnv(t)
+	claude = filepath.Join(env.Home, ".claude", "CLAUDE.md")
+	clWrite(t, claude, skBlock()+"\n")
+	if _, err := UninstallInstructions(env, false); err != nil {
+		t.Fatal(err)
+	}
+	if pathExists(filepath.Join(env.Home, ".claude")) {
+		t.Fatal("~/.claude quedó vacía y debe retirarse")
 	}
 }
 

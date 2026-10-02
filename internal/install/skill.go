@@ -239,12 +239,17 @@ func copySkillTree(src fs.FS, root, dest string) error {
 }
 
 // UninstallSkill removes the lodan-memoria folders that InstallSkill created.
-// The backup of the old lodan-memory skill is left alone.
+// The backup of the old lodan-memory skill is left alone. If it removed the
+// skill from ~/.claude/skills and that leaves ~/.claude/skills or ~/.claude
+// completely empty, those empty folders are removed too (lodan creates them
+// when Claude Code is not installed); a folder with anything else is kept.
 func UninstallSkill(env Env, dryRun bool) ([]string, error) {
 	roots, err := skillRoots(env)
 	if err != nil {
 		return nil, err
 	}
+	claudeSkills := filepath.Join(env.Home, ".claude", "skills")
+	removedFromClaude := false
 	var report []string
 	for _, root := range roots {
 		dest := filepath.Join(root, skillName)
@@ -259,28 +264,97 @@ func UninstallSkill(env Env, dryRun bool) ([]string, error) {
 				return report, err
 			}
 		}
+		if root == claudeSkills {
+			removedFromClaude = true
+		}
 		report = append(report, fmt.Sprintf("%sskill retirada: %s", simulated(dryRun), dest))
+	}
+	if removedFromClaude && !dryRun {
+		lines, err := pruneClaudeHome(env)
+		report = append(report, lines...)
+		if err != nil {
+			return report, err
+		}
 	}
 	return report, nil
 }
 
-// instructionTarget is a global instruction file of a client. It is only
-// written when the client folder already exists.
+// removeDirIfEmpty removes dir only when it is a real directory (not a
+// symlink) without any entry. It reports whether it removed it.
+func removeDirIfEmpty(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) > 0 {
+		return false, nil
+	}
+	if err := os.Remove(dir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// pruneClaudeHome removes ~/.claude/skills and ~/.claude when they are left
+// totally empty after lodan took its files out. Anything else inside keeps
+// them in place; nothing that is not empty is ever deleted.
+func pruneClaudeHome(env Env) ([]string, error) {
+	claude := filepath.Join(env.Home, ".claude")
+	var report []string
+	for _, dir := range []string{filepath.Join(claude, "skills"), claude} {
+		removed, err := removeDirIfEmpty(dir)
+		if err != nil {
+			return report, err
+		}
+		if removed {
+			report = append(report, fmt.Sprintf("carpeta vacía retirada: %s", dir))
+		}
+	}
+	return report, nil
+}
+
+// instructionTarget is a global instruction file of a client.
 type instructionTarget struct {
 	dir         string
 	file        string
 	manualCheck bool
+	// active reports whether the block must be written (and checked) for this
+	// client. Removal ignores it: an existing lodan block is always removed.
+	active func(env Env) bool
+	// ownsDir marks a folder that lodan may have created itself, so
+	// uninstalling prunes it when it is left empty.
+	ownsDir bool
 }
 
 // instructionTargets lists ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md and
 // ~/.gemini/GEMINI.md. Only CLAUDE.md is checked for the manual section: the
 // user already keeps a hand-written "## Memoria persistente: lodan" there, and
 // adding the block on top would duplicate the rule.
+//
+// Claude Code is active only when it is really installed (detectClaudeCode),
+// not when ~/.claude exists: the skill installer creates that folder itself.
+// Codex and Gemini are active when their folder already exists.
 func instructionTargets(env Env) []instructionTarget {
+	folder := func(dir string) func(Env) bool {
+		return func(Env) bool { return dirExists(dir) }
+	}
+	claudeDir := filepath.Join(env.Home, ".claude")
+	codexDir := filepath.Join(env.Home, ".codex")
+	geminiDir := filepath.Join(env.Home, ".gemini")
 	return []instructionTarget{
-		{filepath.Join(env.Home, ".claude"), "CLAUDE.md", true},
-		{filepath.Join(env.Home, ".codex"), "AGENTS.md", false},
-		{filepath.Join(env.Home, ".gemini"), "GEMINI.md", false},
+		{dir: claudeDir, file: "CLAUDE.md", manualCheck: true, active: detectClaudeCode, ownsDir: true},
+		{dir: codexDir, file: "AGENTS.md", active: folder(codexDir)},
+		{dir: geminiDir, file: "GEMINI.md", active: folder(geminiDir)},
 	}
 }
 
@@ -348,7 +422,9 @@ func removeInstructionBlock(old string) (string, bool, error) {
 
 // InstallInstructions writes the lodan block between <!-- lodan:inicio --> and
 // <!-- lodan:fin --> in the global instruction files of Claude Code, Codex and
-// Gemini, only when their folder (~/.claude, ~/.codex, ~/.gemini) exists.
+// Gemini. Codex and Gemini only when their folder (~/.codex, ~/.gemini)
+// exists; Claude Code only when it is detected (~/.claude.json or the claude
+// CLI on the PATH), not merely because ~/.claude exists.
 //
 // Rules: an existing block is replaced; otherwise it is appended after a blank
 // line; the first modification of a file keeps a .bak-lodan copy.
@@ -364,11 +440,17 @@ func InstallInstructions(env Env, dryRun bool) ([]string, error) {
 	}
 	var report []string
 	for _, t := range instructionTargets(env) {
-		if !dirExists(t.dir) {
+		if !t.active(env) {
 			continue
 		}
 		path := filepath.Join(t.dir, t.file)
 		action := ""
+		if !dryRun {
+			// Claude Code can be detected without ~/.claude existing yet.
+			if err := os.MkdirAll(t.dir, 0o755); err != nil {
+				return report, err
+			}
+		}
 		_, err := editTextFile(path, 0o644, false, dryRun, func(old string) (string, error) {
 			if t.manualCheck && !strings.Contains(old, instructionsStart) && hasManualSection(old) {
 				action = "ya presente (manual)"
@@ -481,7 +563,7 @@ func CheckInstructions(env Env) (ok bool, detail string) {
 	}
 	var checked, problems []string
 	for _, t := range instructionTargets(env) {
-		if !dirExists(t.dir) {
+		if !t.active(env) {
 			continue
 		}
 		path := filepath.Join(t.dir, t.file)
@@ -510,12 +592,15 @@ func CheckInstructions(env Env) (ok bool, detail string) {
 }
 
 // UninstallInstructions removes the marked block (markers included) from the
-// global instruction files. A file that only held the block is deleted.
+// global instruction files. A file that only held the block is deleted, and
+// then ~/.claude is removed if it ends up completely empty. The block is
+// removed wherever it is, whether or not the client is detected.
 func UninstallInstructions(env Env, dryRun bool) ([]string, error) {
 	if env.Home == "" {
 		return nil, errors.New("no se conoce el directorio personal del usuario")
 	}
 	var report []string
+	prune := false
 	for _, t := range instructionTargets(env) {
 		path := filepath.Join(t.dir, t.file)
 		if !pathExists(path) {
@@ -537,6 +622,16 @@ func UninstallInstructions(env Env, dryRun bool) ([]string, error) {
 		}
 		if removed {
 			report = append(report, fmt.Sprintf("%s%s: bloque quitado", simulated(dryRun), path))
+			if t.ownsDir {
+				prune = true
+			}
+		}
+	}
+	if prune && !dryRun {
+		lines, err := pruneClaudeHome(env)
+		report = append(report, lines...)
+		if err != nil {
+			return report, err
 		}
 	}
 	return report, nil

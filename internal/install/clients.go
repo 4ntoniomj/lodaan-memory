@@ -241,8 +241,11 @@ func zedDir(env Env) string {
 	return homePath(env, ".config", "zed")
 }
 
+// detectClaudeCode reports whether Claude Code is installed: ~/.claude.json
+// exists or the claude CLI is on the PATH. The ~/.claude folder does not count:
+// lodan itself creates it to install the skill.
 func detectClaudeCode(env Env) bool {
-	if pathExists(homePath(env, ".claude.json")) || pathExists(homePath(env, ".claude")) {
+	if pathExists(homePath(env, ".claude.json")) {
 		return true
 	}
 	_, err := cliLookPath("claude")
