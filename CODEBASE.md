@@ -10,7 +10,7 @@
 | github.com/pgvector/pgvector-go | librería | v0.4.1 | Tipos `vector`/`halfvec` para pgx |
 | github.com/oklog/ulid/v2 | librería | v2.1.2 | Identificadores de sesión ordenables por tiempo |
 | github.com/google/jsonschema-go | librería | v0.4.3 | Esquemas de entrada de las herramientas MCP (enums) |
-| github.com/klauspost/compress | librería | v1.20.1 | Descompresión zstd de los paquetes de Ollama |
+| github.com/klauspost/compress | librería | v1.20.1 | zstd: compresión de los backups (`.tar.zst`) y descompresión de los paquetes de Ollama |
 | github.com/jackc/pgpassfile | librería | v1.0.0 | Indirecta (pgx) |
 | github.com/jackc/pgservicefile | librería | v0.0.0-20240606120523-5a60cdf6a761 | Indirecta (pgx) |
 | golang.org/x/text | librería | v0.29.0 | Indirecta (pgx) |
