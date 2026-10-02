@@ -26,7 +26,13 @@ const (
 // same stale lock at the same instant could in theory both proceed. The window is tiny and the
 // protected operations (initdb, pg_ctl start, CREATE DATABASE) are idempotent.
 func acquireLock(ctx context.Context, path string) (func(), error) {
-	deadline := time.Now().Add(lockWaitDeadline)
+	return acquireLockWait(ctx, path, lockWaitDeadline, "otro proceso de lodan está arrancando el clúster")
+}
+
+// acquireLockWait is acquireLock with a custom wait limit and a custom explanation for the
+// timeout error (busy says who is probably holding the lock).
+func acquireLockWait(ctx context.Context, path string, wait time.Duration, busy string) (func(), error) {
+	deadline := time.Now().Add(wait)
 
 	for {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -56,7 +62,7 @@ func acquireLock(ctx context.Context, path string) (func(), error) {
 		}
 
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("tiempo de espera agotado (%s) esperando el lock %s: otro proceso de lodan está arrancando el clúster", lockWaitDeadline, path)
+			return nil, fmt.Errorf("tiempo de espera agotado (%s) esperando el lock %s: %s", wait, path, busy)
 		}
 		select {
 		case <-ctx.Done():

@@ -29,11 +29,15 @@ Subcomandos:
   service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
   bench     Ejecuta el benchmark (--rows, --out)
 
-Copias de seguridad (paran PostgreSQL unos segundos):
+Copias de seguridad (paran PostgreSQL solo mientras se copian los datos; la compresión
+se hace con PostgreSQL ya en marcha y el destino necesita espacio libre para esa copia):
   lodan db backup [--to destino] [--full|--incremental|--differential]
-      Crea destino/lodan_backup_AAAA-MM-DD_HHMMSS.<full|incr|diff>.tar.xz
+      Crea destino/lodan_backup_AAAA-MM-DD_HHMMSS.<full|incr|diff>.tar.zst
       (por defecto un backup full en el directorio temporal del sistema).
-  lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...]
+      --differential: cambios desde el último full del destino.
+      --incremental: cambios desde el último backup del destino, de cualquier tipo.
+      Ambos requieren un full previo en el destino.
+  lodan db restore --from archivo1.tar.zst [archivo2.tar.zst ...]
   lodan db restore --from /carpeta
       Restaura un full y, opcionalmente, incrementales y diferenciales (del más antiguo
       al más reciente). Con una carpeta usa el último full y los backups posteriores.

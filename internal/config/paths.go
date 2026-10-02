@@ -49,3 +49,7 @@ func (c Config) LogsDir() string { return filepath.Join(c.DataDir, "logs") }
 
 // LockFile is the path of the lockfile used to serialize cluster startup.
 func (c Config) LockFile() string { return filepath.Join(c.DataDir, "lodan.lock") }
+
+// HeartbeatFile is the path of the file that the service supervisor touches while it is alive,
+// so that a backup or restore knows it must hand PostgreSQL back to it.
+func (c Config) HeartbeatFile() string { return filepath.Join(c.DataDir, "supervisor.heartbeat") }

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/ulikunitz/xz"
+	"github.com/klauspost/compress/zstd"
 
 	"lodan/internal/config"
 )
@@ -407,25 +407,87 @@ func (c *Cluster) DSN(dbname string) (string, error) {
 // Backup and restore.
 //
 // A backup is a cold copy: PostgreSQL is stopped while the files are read, so the archive is
-// always consistent. It is a tar compressed with xz named lodan_backup_<date>_<time>.<kind>.tar.xz
-// (kind: full, incr or diff) with these entries, in this order: info.txt (metadata), pg/ (the
-// cluster; only the files changed since the reference backup for incr and diff), config.json
-// (if it exists) and secret. Incremental and differential backups use the file modification
-// time against the creation time of the reference backup (stored in its info.txt). Files deleted
-// since the reference are not tracked: restoring applies the changed files over the full one.
+// always consistent. It is a tar compressed with zstd (default level) named
+// lodan_backup_<date>_<time>.<kind>.tar.zst (kind: full, incr or diff) with these entries, in this
+// order: info.txt (metadata), manifest.txt (see below), pg/ (the cluster; only the files changed
+// since the reference backup for incr and diff), config.json (if it exists) and secret.
+//
+// Downtime and disk space. PostgreSQL is stopped only while what has to be archived (the
+// directories and the chosen files of pg/, plus config.json and secret) is copied, uncompressed,
+// to a staging directory inside the destination (.lodan_backup_<date>.<kind>.staging, mode 0700,
+// keeping the mode and modification time of every file). So the downtime lasts as long as that
+// copy takes, and the destination needs free space for an uncompressed copy of what is backed up.
+// Then PostgreSQL is started again and the cluster lock is released (the service supervisor takes
+// that lock to prepare and start PostgreSQL, so it must not be held while compressing), and only
+// then is the archive compressed from the staging copy, so compression happens with PostgreSQL
+// already running. The archive is written to a .part file renamed at the end. The staging
+// directory is always removed when the backup ends, successfully or not (and the .part file if it
+// fails); one left by an interrupted backup is deleted at the start of the next one.
+//
+// Concurrent backups. A lock file inside the destination (.lodan_backup.lock, same mechanism as
+// the cluster lock: refreshed while it is held, abandoned after lockStaleAfter) serializes the
+// backups into the same destination from the start to the end of each one, compression included,
+// so that a slow full backup and a cron incremental one cannot delete each other's staging
+// directory. A backup waits up to lockWaitDeadline for it and then fails saying that another
+// backup is in progress. Lock order: destination first, then cluster. Restore does not take it.
+//
+// There are three kinds, with the usual meaning:
+//   - full: every file of the cluster.
+//   - differential (diff): the files modified since the last full backup in the destination.
+//   - incremental (incr): the files modified since the last backup of any kind (full, incr or
+//     diff) in the destination.
+//
+// Both incr and diff fail if the destination has no full backup. A regular file is copied if any
+// of these holds against the reference backup (the one whose creation time is stored in info.txt
+// as "desde"):
+//   - its modification time is after that creation time (minus backupSinceMargin);
+//   - its path is not listed in the manifest of the reference backup;
+//   - its size differs from the one in that manifest.
+//
+// The last two exist because rename(2) keeps the modification time: PostgreSQL recycles WAL
+// segments by renaming old ones to future names, so a "new" file can have an old mtime and would
+// be missed by the first rule alone. Restore then would find in the manifest a file that no
+// backup of the chain holds. With the three rules, by induction every backup contains whatever
+// its manifest lists that the reference manifest did not list (or listed with another size) or
+// that changed, and the reference chain already holds the rest: the chain holds everything the
+// manifest of its last backup lists.
+//
+// Restoring a chain means extracting the full backup and then every incr and diff after it, from
+// oldest to newest, replacing the files that already exist.
+//
+// Files deleted since the reference cannot be seen from the modification times, so every backup
+// (full, incr or diff) also carries manifest.txt: the complete list of what pg/ contained when it
+// was made (not only what was copied). Restore uses the manifest of the newest backup of the
+// chain to delete whatever should no longer be there and to check that nothing is missing.
+//
+// manifest.txt has one line per directory or regular file of pg/ (postmaster.pid excluded; pg/
+// itself is not listed), sorted by path (byte order), each one as:
+//
+//	<d|f> <size> <relative/path>
+//
+// "d" is a directory (size 0) and "f" a regular file (size in bytes). The path comes last, slash
+// separated and relative to pg/, and may contain spaces but never a line break.
 
 const (
-	// BackupFull, BackupIncremental and BackupDifferential are the values accepted by Backup.
+	// BackupFull makes a complete backup. BackupIncremental and BackupDifferential make a backup
+	// of only what changed (see above). They are the values accepted by Backup.
 	BackupFull         = "full"
 	BackupIncremental  = "incremental"
 	BackupDifferential = "differential"
 
-	backupNameLayout = "2006-01-02_150405"
-	backupPrefix     = "lodan_backup_"
-	backupExt        = ".tar.xz"
-	backupInfoFile   = "info.txt"
-	backupPGEntry    = "pg"
-	backupFormat     = "lodan-backup/1"
+	backupNameLayout   = "2006-01-02_150405"
+	backupPrefix       = "lodan_backup_"
+	backupExt          = ".tar.zst"
+	backupInfoFile     = "info.txt"
+	backupManifestFile = "manifest.txt"
+	backupPGEntry      = "pg"
+	backupFormat       = "lodan-backup/2"
+
+	// manifestMaxBytes caps how much of manifest.txt is read (and how big one may be when
+	// writing it). A line takes about 80 bytes (type, size and a relative path of a few dozen
+	// characters), so 64 MiB leave room for roughly 800,000 entries, far more than the tens of
+	// thousands that even a large lodan cluster has.
+	manifestMaxBytes = 64 << 20
 
 	// backupSinceMargin is subtracted from the reference time when looking for changed files:
 	// it covers the coarse resolution of file timestamps. Including a file twice is harmless;
@@ -441,7 +503,23 @@ const (
 )
 
 // backupNameRe matches the file name of a backup; the group is its kind (full, incr, diff).
-var backupNameRe = regexp.MustCompile(`^lodan_backup_\d{4}-\d{2}-\d{2}_\d{6}\.(full|incr|diff)\.tar\.xz$`)
+var backupNameRe = regexp.MustCompile(`^lodan_backup_\d{4}-\d{2}-\d{2}_\d{6}\.(full|incr|diff)\.tar\.zst$`)
+
+// backupLockName is the lock file that a backup keeps inside its destination while it runs. It
+// is not a backup, so it never matches backupNameRe and listBackups ignores it.
+const backupLockName = ".lodan_backup.lock"
+
+// backupLockWait is how long a backup waits for the lock of its destination before giving up
+// with an error (the same limit as the cluster lock; a variable so that tests can shorten it).
+var backupLockWait = lockWaitDeadline
+
+// backupStagingSuffix ends the name of the staging directory of a backup in progress, which is
+// ".lodan_backup_<date>.<kind>.staging" inside the destination.
+const backupStagingSuffix = ".staging"
+
+// backupStagingRe matches the name of the staging directory of a backup (see stagingDirName).
+// It never matches backupNameRe, so listBackups cannot take one for a backup.
+var backupStagingRe = regexp.MustCompile(`^\.lodan_backup_\d{4}-\d{2}-\d{2}_\d{6}\.(full|incr|diff)\.staging$`)
 
 // backupInfo is the content of the info.txt of a backup.
 type backupInfo struct {
@@ -475,7 +553,7 @@ func parseBackupInfo(r io.Reader) (backupInfo, error) {
 		return backupInfo{}, fmt.Errorf("no se pudo leer %s: %w", backupInfoFile, err)
 	}
 	var info backupInfo
-	validFormat := false
+	format := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), ": ")
 		if !ok {
@@ -483,7 +561,7 @@ func parseBackupInfo(r io.Reader) (backupInfo, error) {
 		}
 		switch key {
 		case "formato":
-			validFormat = val == backupFormat
+			format = val
 		case "tipo":
 			info.Kind = val
 		case "fecha":
@@ -506,8 +584,11 @@ func parseBackupInfo(r io.Reader) (backupInfo, error) {
 			info.PGVersion = val
 		}
 	}
-	if !validFormat {
-		return backupInfo{}, fmt.Errorf("%s no tiene el formato esperado (%s)", backupInfoFile, backupFormat)
+	if format != backupFormat {
+		if format == "" {
+			return backupInfo{}, fmt.Errorf("%s no tiene el formato esperado (%s)", backupInfoFile, backupFormat)
+		}
+		return backupInfo{}, fmt.Errorf("%s tiene el formato %q y solo se admite %s: el backup se hizo con otra versión de lodan", backupInfoFile, format, backupFormat)
 	}
 	switch info.Kind {
 	case "full", "incr", "diff":
@@ -537,6 +618,11 @@ func backupKind(backupType string) (string, error) {
 // acquireLock treats a lock older than lockStaleAfter as abandoned; a long backup or restore
 // must not lose it, or a restarting service supervisor could start PostgreSQL in the middle.
 func (c *Cluster) keepLockAlive() (stop func()) {
+	return keepFileAlive(c.cfg.LockFile())
+}
+
+// keepFileAlive touches the lock file at path periodically until the returned function is called.
+func keepFileAlive(path string) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
@@ -549,7 +635,7 @@ func (c *Cluster) keepLockAlive() (stop func()) {
 				return
 			case <-ticker.C:
 				now := time.Now()
-				_ = os.Chtimes(c.cfg.LockFile(), now, now)
+				_ = os.Chtimes(path, now, now)
 			}
 		}
 	}()
@@ -569,10 +655,18 @@ func (c *Cluster) startDetached(ctx context.Context) error {
 }
 
 // Backup writes a backup of the cluster, config.json and secret into destDir and returns the
-// path of the archive. backupType is BackupFull, BackupIncremental (changes since the last
-// full backup in destDir) or BackupDifferential (changes since the last full or differential
-// backup in destDir). PostgreSQL is stopped while the files are read and started again at the
-// end if it was running; a lock serializes it with the rest of the operations on the cluster.
+// path of the archive. backupType is BackupFull, BackupDifferential (changes since the last full
+// backup in destDir) or BackupIncremental (changes since the last backup of any kind in destDir);
+// the last two fail if destDir has no full backup. PostgreSQL is stopped only while what has to be
+// archived is copied to a staging directory inside destDir, and started again (if it was running)
+// before the archive is compressed; the cluster lock is held until then and released before
+// compressing. If PostgreSQL cannot be restarted, the archive is still written and the returned
+// error reports the restart failure together with a non-empty path.
+//
+// With the service supervisor active (SupervisorActive) PostgreSQL is not started by Backup, so
+// that it stays a child of the service: the lock is released and Backup waits (polling Status
+// every 500 ms, up to restartTimeout) for the supervisor to start it. If that does not happen it
+// starts PostgreSQL itself and returns an error saying so (the archive is still written).
 func (c *Cluster) Backup(ctx context.Context, destDir, backupType string) (path string, err error) {
 	kind, err := backupKind(backupType)
 	if err != nil {
@@ -588,24 +682,119 @@ func (c *Cluster) Backup(ctx context.Context, destDir, backupType string) (path 
 	if err != nil {
 		return "", fmt.Errorf("ruta de destino inválida: %w", err)
 	}
-	if err := os.MkdirAll(destDir, 0o700); err != nil {
-		return "", fmt.Errorf("no se pudo crear el directorio de destino %s: %w", destDir, err)
-	}
 	pgReal, err := filepath.EvalSymlinks(c.cfg.PGDataDir())
 	if err != nil {
 		return "", fmt.Errorf("no se pudo resolver %s: %w", c.cfg.PGDataDir(), err)
 	}
-	destReal, err := filepath.EvalSymlinks(destDir)
+	// The destination may not exist yet: it is checked before creating it, so that a rejected
+	// destination inside the data directory leaves nothing behind.
+	destReal, err := resolveExistingPrefix(destDir)
 	if err != nil {
 		return "", fmt.Errorf("no se pudo resolver %s: %w", destDir, err)
 	}
 	if pathWithin(pgReal, destReal) {
 		return "", fmt.Errorf("el destino %s está dentro del directorio de datos de PostgreSQL (%s): elige otro", destDir, pgReal)
 	}
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return "", fmt.Errorf("no se pudo crear el directorio de destino %s: %w", destDir, err)
+	}
 
-	unlock, err := c.Lock(ctx)
+	// The destination lock serializes the backups into destDir for their whole duration,
+	// compression included, so one cannot delete the staging directory of another or pick a
+	// stale reference. Lock order: destination first, then cluster (taken in takeSnapshot).
+	// Restore does not need it.
+	lockPath := filepath.Join(destDir, backupLockName)
+	unlockDest, err := acquireLockWait(ctx, lockPath, backupLockWait,
+		fmt.Sprintf("hay otro backup en curso en el destino %s (si no es así, borra ese archivo)", destDir))
 	if err != nil {
 		return "", err
+	}
+	defer unlockDest()
+	stopDestKeepAlive := keepFileAlive(lockPath)
+	defer stopDestKeepAlive()
+
+	// Leftovers of an interrupted backup. Safe to delete: nobody else is backing up into destDir.
+	if err := removeOrphanStaging(destDir); err != nil {
+		return "", err
+	}
+
+	// Phase 1, under the cluster lock: copy what has to be archived to the staging directory.
+	// snap can be non-nil together with an error: PostgreSQL could not be restarted, but the
+	// copy is complete and the archive is still worth writing.
+	handoff := false
+	snap, snapErr := c.takeSnapshot(ctx, destDir, kind, pgReal, &handoff)
+	if handoff {
+		// The service supervisor has to start PostgreSQL; the lock is already released.
+		snapErr = errors.Join(snapErr, c.awaitSupervisorStart(ctx))
+	}
+	if snap == nil {
+		return "", snapErr
+	}
+	// The staging directory is always removed, whatever happens next.
+	defer snap.remove()
+
+	// Phase 2, without the lock and with PostgreSQL running again: compress from the staging copy.
+	dest := filepath.Join(destDir, backupPrefix+snap.info.CreatedAt.Format(backupNameLayout)+"."+kind+backupExt)
+	if _, serr := os.Lstat(dest); serr == nil {
+		return "", errors.Join(snapErr, fmt.Errorf("ya existe %s: espera un segundo y repite el backup", dest))
+	}
+	if werr := writeBackupArchive(dest, snap.info, snap.manifest, snap.entries); werr != nil {
+		return "", errors.Join(snapErr, werr)
+	}
+	return dest, snapErr
+}
+
+// backupSnapshot is the consistent copy of what a backup archives, taken while PostgreSQL was
+// stopped: a staging directory with the files, plus the metadata of the archive.
+type backupSnapshot struct {
+	staging  string        // directory inside the destination that holds the copy
+	info     backupInfo    // content of info.txt
+	manifest string        // text of manifest.txt
+	entries  []backupEntry // what to archive, with Path pointing into staging
+}
+
+// remove deletes the staging directory. It is safe to call more than once.
+func (s *backupSnapshot) remove() {
+	_ = os.RemoveAll(s.staging)
+}
+
+// stagingDirName returns the name of the staging directory of a backup created at createdAt.
+func stagingDirName(createdAt time.Time, kind string) string {
+	return "." + backupPrefix + createdAt.Format(backupNameLayout) + "." + kind + backupStagingSuffix
+}
+
+// removeOrphanStaging deletes the staging directories that an interrupted backup left in dir.
+func removeOrphanStaging(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("no se pudo leer %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !backupStagingRe.MatchString(e.Name()) {
+			continue
+		}
+		orphan := filepath.Join(dir, e.Name())
+		if err := os.RemoveAll(orphan); err != nil {
+			return fmt.Errorf("no se pudo borrar la copia temporal huérfana %s de un backup interrumpido: %w", orphan, err)
+		}
+	}
+	return nil
+}
+
+// takeSnapshot is phase 1 of a backup. Under the cluster lock it stops PostgreSQL (if it was
+// running), copies the entries to archive into a new staging directory in destDir, restarts
+// PostgreSQL and releases the lock. If it returns a snapshot, the caller owns the staging
+// directory and must remove it; if it fails before the copy is complete it removes it itself.
+//
+// A failure to restart PostgreSQL is returned together with the (complete) snapshot.
+//
+// If PostgreSQL was running and the service supervisor is active (SupervisorActive), it is not
+// started here: *handoff is set to true and the caller, once the lock is released, waits for the
+// supervisor to start it (awaitSupervisorStart). This holds also if the copy failed.
+func (c *Cluster) takeSnapshot(ctx context.Context, destDir, kind, pgReal string, handoff *bool) (snap *backupSnapshot, err error) {
+	unlock, err := c.Lock(ctx)
+	if err != nil {
+		return nil, err
 	}
 	defer unlock()
 	stopKeepAlive := c.keepLockAlive()
@@ -613,59 +802,75 @@ func (c *Cluster) Backup(ctx context.Context, destDir, backupType string) (path 
 
 	// Reference backup of an incremental or differential one.
 	var since time.Time
-	switch kind {
-	case "incr":
-		last, err := findLastFullBackup(destDir)
+	var refFiles map[string]int64 // regular files of the reference backup: path -> size
+	if kind != "full" {
+		ref, err := referenceBackup(destDir, kind)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		if last == "" {
-			return "", fmt.Errorf("no hay ningún backup full en %s: haz primero uno con `lodan db backup --full`", destDir)
-		}
-		ref, err := readBackupInfo(last)
+		refManifest, err := readBackupManifest(ref.Path)
 		if err != nil {
-			return "", err
-		}
-		since = ref.CreatedAt
-	case "diff":
-		ref, ok, err := findLastBackup(destDir, "full", "diff")
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "", fmt.Errorf("no hay ningún backup full en %s: haz primero uno con `lodan db backup --full`", destDir)
+			return nil, err
 		}
 		since = ref.Info.CreatedAt
+		refFiles = make(map[string]int64, len(refManifest))
+		for _, e := range refManifest {
+			if !e.Dir {
+				refFiles[e.Path] = e.Size
+			}
+		}
 	}
 
 	wasRunning, err := c.Status(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if wasRunning {
 		if err := c.Stop(ctx); err != nil {
-			return "", err
+			return nil, err
 		}
+		// Deferred functions run in reverse order: this one runs after the staging cleanup
+		// below and before the lock is released.
 		defer func() {
+			if c.SupervisorActive() {
+				// The supervisor saw PostgreSQL stop under our lock and is waiting for it
+				// to be released to start PostgreSQL again as its own child.
+				*handoff = true
+				return
+			}
 			if serr := c.startDetached(ctx); serr != nil {
-				err = errors.Join(err, fmt.Errorf("no se pudo reiniciar PostgreSQL tras el backup: %w", serr))
+				err = errors.Join(err, fmt.Errorf("no se pudo reiniciar PostgreSQL tras copiar los datos del backup: %w", serr))
 			}
 		}()
 	}
 
 	// From here on PostgreSQL is stopped: no file changes until the deferred restart.
 	createdAt := time.Now()
+	staging := filepath.Join(destDir, stagingDirName(createdAt, kind))
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		return nil, fmt.Errorf("no se pudo crear el directorio temporal %s: %w", staging, err)
+	}
+	defer func() {
+		if snap == nil {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+
 	cut := time.Time{}
 	if !since.IsZero() {
 		cut = since.Add(-backupSinceMargin)
 	}
-	entries, err := collectChangedFiles(pgReal, cut)
+	entries, manifest, err := collectChangedFiles(pgReal, cut, refFiles)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	manifestText := renderManifest(manifest)
+	if len(manifestText) > manifestMaxBytes {
+		return nil, fmt.Errorf("el manifiesto del clúster (%d entradas) ocupa %d bytes y supera el límite de %d: no se podría restaurar", len(manifest), len(manifestText), manifestMaxBytes)
 	}
 	extras, err := c.backupExtras()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	entries = append(entries, extras...)
 
@@ -680,14 +885,83 @@ func (c *Cluster) Backup(ctx context.Context, destDir, backupType string) (path 
 		info.PGVersion = strings.TrimSpace(string(version))
 	}
 
-	dest := filepath.Join(destDir, backupPrefix+createdAt.Format(backupNameLayout)+"."+kind+backupExt)
-	if _, serr := os.Lstat(dest); serr == nil {
-		return "", fmt.Errorf("ya existe %s: espera un segundo y repite el backup", dest)
+	staged, err := copyToStaging(ctx, staging, entries)
+	if err != nil {
+		return nil, err
 	}
-	if err := writeBackupArchive(dest, info, entries); err != nil {
-		return "", err
+	return &backupSnapshot{staging: staging, info: info, manifest: manifestText, entries: staged}, nil
+}
+
+// copyToStaging copies entries (directories and regular files) into staging, under their archive
+// names, keeping the mode and modification time of each file and checking that every copy has the
+// expected size. Directories are created 0700 so that the staging directory can always be
+// removed. It returns the entries to archive: same names and Info as the originals, with Path
+// pointing to the copies. Directories come before their contents, as collectChangedFiles returns
+// them.
+func copyToStaging(ctx context.Context, staging string, entries []backupEntry) ([]backupEntry, error) {
+	staged := make([]backupEntry, 0, len(entries))
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		target := filepath.Join(staging, filepath.FromSlash(e.Name))
+		switch {
+		case e.Info.IsDir():
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return nil, fmt.Errorf("no se pudo crear %s: %w", target, err)
+			}
+		case e.Info.Mode().IsRegular():
+			if err := copyStagedEntry(e, target); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("%s no es un archivo regular ni un directorio: no se puede respaldar", e.Path)
+		}
+		staged = append(staged, backupEntry{Path: target, Name: e.Name, Info: e.Info})
 	}
-	return dest, nil
+	return staged, nil
+}
+
+// copyStagedEntry copies the regular file e to target with the mode and modification time of e.
+func copyStagedEntry(e backupEntry, target string) (err error) {
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return fmt.Errorf("no se pudo crear %s: %w", filepath.Dir(target), err)
+	}
+	src, err := os.Open(e.Path)
+	if err != nil {
+		return fmt.Errorf("no se pudo abrir %s: %w", e.Path, err)
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("no se pudo crear %s: %w", target, err)
+	}
+	want := e.Info.Size()
+	// One byte more than expected, to notice a file that grew.
+	n, err := io.Copy(dst, io.LimitReader(src, want+1))
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("no se pudo copiar %s: %w", e.Path, err)
+	}
+	if n != want {
+		return fmt.Errorf("%s cambió de tamaño durante el backup (esperado %d bytes, leídos %d)", e.Path, want, n)
+	}
+	if err := os.Chmod(target, e.Info.Mode().Perm()); err != nil {
+		return fmt.Errorf("no se pudieron fijar los permisos de %s: %w", target, err)
+	}
+	if err := os.Chtimes(target, e.Info.ModTime(), e.Info.ModTime()); err != nil {
+		return fmt.Errorf("no se pudo fijar la fecha de %s: %w", target, err)
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("no se pudo comprobar %s: %w", target, err)
+	}
+	if fi.Size() != want {
+		return fmt.Errorf("la copia %s mide %d bytes y se esperaban %d", target, fi.Size(), want)
+	}
+	return nil
 }
 
 // backupExtras returns the entries for config.json (optional) and secret (required).
@@ -722,6 +996,28 @@ func pathWithin(base, p string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// resolveExistingPrefix resolves the symbolic links of p even if the end of the path does not
+// exist yet: it resolves the longest existing prefix and appends the rest as it is.
+func resolveExistingPrefix(p string) (string, error) {
+	rest := ""
+	cur := p
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, rest), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
 // backupEntry is a file or directory to put in the archive.
 type backupEntry struct {
 	Path string      // location on disk
@@ -729,13 +1025,94 @@ type backupEntry struct {
 	Info fs.FileInfo // from Lstat
 }
 
-// collectChangedFiles walks pgDataDir and returns every directory (their modes matter: PostgreSQL
-// needs pg/ to be 0700) and the regular files whose modification time is after sinceTime; a zero
-// sinceTime returns every file. postmaster.pid is never included. Symbolic links are rejected
-// (tablespaces are not supported) and other special files are skipped.
-func collectChangedFiles(pgDataDir string, sinceTime time.Time) ([]backupEntry, error) {
-	var out []backupEntry
-	err := filepath.WalkDir(pgDataDir, func(path string, d fs.DirEntry, err error) error {
+// manifestEntry is one line of manifest.txt: a directory or a regular file of pg/.
+type manifestEntry struct {
+	Path string // relative to pg/, slash separated
+	Dir  bool
+	Size int64 // bytes; zero for a directory
+}
+
+// renderManifest returns the text of manifest.txt for entries, which must be sorted by path.
+func renderManifest(entries []manifestEntry) string {
+	var b strings.Builder
+	for _, e := range entries {
+		kind := 'f'
+		if e.Dir {
+			kind = 'd'
+		}
+		fmt.Fprintf(&b, "%c %d %s\n", kind, e.Size, e.Path)
+	}
+	return b.String()
+}
+
+// parseManifest reads the text written by renderManifest. It reads at most manifestMaxBytes and
+// rejects anything that renderManifest could not have produced: bad lines, paths that are not
+// clean relative ones, and entries out of order or repeated.
+func parseManifest(r io.Reader) ([]manifestEntry, error) {
+	data, err := io.ReadAll(io.LimitReader(r, manifestMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo leer %s: %w", backupManifestFile, err)
+	}
+	if len(data) > manifestMaxBytes {
+		return nil, fmt.Errorf("%s supera el límite de %d bytes", backupManifestFile, manifestMaxBytes)
+	}
+	text := string(data)
+	if text == "" {
+		return nil, fmt.Errorf("%s está vacío", backupManifestFile)
+	}
+	if !strings.HasSuffix(text, "\n") {
+		return nil, fmt.Errorf("%s está truncado: la última línea no termina en salto de línea", backupManifestFile)
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	out := make([]manifestEntry, 0, len(lines))
+	for i, line := range lines {
+		kind, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			return nil, fmt.Errorf("%s, línea %d: formato inválido", backupManifestFile, i+1)
+		}
+		sizeText, path, ok := strings.Cut(rest, " ")
+		if !ok {
+			return nil, fmt.Errorf("%s, línea %d: formato inválido", backupManifestFile, i+1)
+		}
+		size, err := strconv.ParseInt(sizeText, 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("%s, línea %d: tamaño inválido %q", backupManifestFile, i+1, sizeText)
+		}
+		e := manifestEntry{Path: path, Size: size}
+		switch kind {
+		case "d":
+			e.Dir = true
+			if size != 0 {
+				return nil, fmt.Errorf("%s, línea %d: un directorio no puede tener tamaño", backupManifestFile, i+1)
+			}
+		case "f":
+		default:
+			return nil, fmt.Errorf("%s, línea %d: tipo desconocido %q", backupManifestFile, i+1, kind)
+		}
+		if path == "." || !fs.ValidPath(path) {
+			return nil, fmt.Errorf("%s, línea %d: ruta inválida %q", backupManifestFile, i+1, path)
+		}
+		if len(out) > 0 && path <= out[len(out)-1].Path {
+			return nil, fmt.Errorf("%s, línea %d: %q está repetida o fuera de orden", backupManifestFile, i+1, path)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// collectChangedFiles walks pgDataDir once and returns what a backup needs from it: the entries
+// to copy (every directory, whose modes matter because PostgreSQL needs pg/ to be 0700, and the
+// regular files that changed; a zero sinceTime selects every file) and the manifest, which lists
+// every directory (except pg/ itself) and regular file with its size regardless of sinceTime,
+// sorted by path. postmaster.pid is never included. Symbolic links are rejected (tablespaces are
+// not supported) and other special files are skipped.
+//
+// With a non-zero sinceTime a regular file has changed if its modification time is after
+// sinceTime, or its path is not in reference (path -> size of the regular files of the reference
+// backup), or its size differs from the one in reference (see the "Backup and restore" comment
+// for why the last two exist).
+func collectChangedFiles(pgDataDir string, sinceTime time.Time, reference map[string]int64) (entries []backupEntry, manifest []manifestEntry, err error) {
+	err = filepath.WalkDir(pgDataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -744,8 +1121,10 @@ func collectChangedFiles(pgDataDir string, sinceTime time.Time) ([]backupEntry, 
 			return err
 		}
 		name := backupPGEntry
+		slashRel := ""
 		if rel != "." {
-			name = backupPGEntry + "/" + filepath.ToSlash(rel)
+			slashRel = filepath.ToSlash(rel)
+			name = backupPGEntry + "/" + slashRel
 		}
 		fi, err := d.Info()
 		if errors.Is(err, os.ErrNotExist) {
@@ -754,31 +1133,42 @@ func collectChangedFiles(pgDataDir string, sinceTime time.Time) ([]backupEntry, 
 		if err != nil {
 			return err
 		}
+		if strings.Contains(slashRel, "\n") {
+			return fmt.Errorf("el nombre %q contiene un salto de línea y no cabe en el manifiesto", path)
+		}
 		switch {
 		case d.IsDir():
-			out = append(out, backupEntry{Path: path, Name: name, Info: fi})
+			entries = append(entries, backupEntry{Path: path, Name: name, Info: fi})
+			if rel != "." {
+				manifest = append(manifest, manifestEntry{Path: slashRel, Dir: true})
+			}
 		case fi.Mode().IsRegular():
 			if rel == "postmaster.pid" {
 				return nil
 			}
+			manifest = append(manifest, manifestEntry{Path: slashRel, Size: fi.Size()})
 			if !sinceTime.IsZero() && !fi.ModTime().After(sinceTime) {
-				return nil
+				if refSize, known := reference[slashRel]; known && refSize == fi.Size() {
+					return nil
+				}
 			}
-			out = append(out, backupEntry{Path: path, Name: name, Info: fi})
+			entries = append(entries, backupEntry{Path: path, Name: name, Info: fi})
 		case fi.Mode()&fs.ModeSymlink != 0:
 			return fmt.Errorf("el enlace simbólico %s no se puede respaldar (¿tablespaces?)", path)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("no se pudo recorrer %s: %w", pgDataDir, err)
+		return nil, nil, fmt.Errorf("no se pudo recorrer %s: %w", pgDataDir, err)
 	}
-	return out, nil
+	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Path < manifest[j].Path })
+	return entries, manifest, nil
 }
 
-// writeBackupArchive writes the tar.xz to destPath through a .part file renamed at the end, so
-// that an interrupted backup is never mistaken for a valid one. info.txt goes first.
-func writeBackupArchive(destPath string, info backupInfo, entries []backupEntry) (err error) {
+// writeBackupArchive writes the tar.zst to destPath through a .part file renamed at the end, so
+// that an interrupted backup is never mistaken for a valid one. info.txt goes first, then
+// manifest.txt (manifest is its text, see renderManifest) and then the entries.
+func writeBackupArchive(destPath string, info backupInfo, manifest string, entries []backupEntry) (err error) {
 	tmp := destPath + ".part"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -791,19 +1181,25 @@ func writeBackupArchive(destPath string, info backupInfo, entries []backupEntry)
 		}
 	}()
 
-	xw, err := xz.NewWriter(f)
+	zw, err := zstd.NewWriter(f)
 	if err != nil {
-		return fmt.Errorf("no se pudo iniciar la compresión xz: %w", err)
+		return fmt.Errorf("no se pudo iniciar la compresión zstd: %w", err)
 	}
-	tw := tar.NewWriter(xw)
+	// On an error path the encoder is still closed to release its resources. This runs before
+	// the deferred function above (which closes f), because defers run in reverse order.
+	zwClosed := false
+	defer func() {
+		if !zwClosed {
+			_ = zw.Close()
+		}
+	}()
+	tw := tar.NewWriter(zw)
 
-	text := info.render()
-	hdr := &tar.Header{Name: backupInfoFile, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(text)), ModTime: info.CreatedAt}
-	if err = tw.WriteHeader(hdr); err != nil {
-		return fmt.Errorf("no se pudo escribir %s: %w", backupInfoFile, err)
+	if err = writeTextEntry(tw, backupInfoFile, info.render(), info.CreatedAt); err != nil {
+		return err
 	}
-	if _, err = io.WriteString(tw, text); err != nil {
-		return fmt.Errorf("no se pudo escribir %s: %w", backupInfoFile, err)
+	if err = writeTextEntry(tw, backupManifestFile, manifest, info.CreatedAt); err != nil {
+		return err
 	}
 	for _, e := range entries {
 		if err = addBackupEntry(tw, e); err != nil {
@@ -813,8 +1209,9 @@ func writeBackupArchive(destPath string, info backupInfo, entries []backupEntry)
 	if err = tw.Close(); err != nil {
 		return fmt.Errorf("no se pudo cerrar el tar: %w", err)
 	}
-	if err = xw.Close(); err != nil {
-		return fmt.Errorf("no se pudo cerrar la compresión xz: %w", err)
+	zwClosed = true
+	if err = zw.Close(); err != nil {
+		return fmt.Errorf("no se pudo cerrar la compresión zstd: %w", err)
 	}
 	if err = f.Sync(); err != nil {
 		return fmt.Errorf("no se pudo sincronizar %s: %w", tmp, err)
@@ -824,6 +1221,18 @@ func writeBackupArchive(destPath string, info backupInfo, entries []backupEntry)
 	}
 	if err = os.Rename(tmp, destPath); err != nil {
 		return fmt.Errorf("no se pudo renombrar %s a %s: %w", tmp, destPath, err)
+	}
+	return nil
+}
+
+// writeTextEntry writes a small text file (info.txt, manifest.txt) as the next tar entry.
+func writeTextEntry(tw *tar.Writer, name, text string, modTime time.Time) error {
+	hdr := &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(text)), ModTime: modTime}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("no se pudo escribir %s: %w", name, err)
+	}
+	if _, err := io.WriteString(tw, text); err != nil {
+		return fmt.Errorf("no se pudo escribir %s: %w", name, err)
 	}
 	return nil
 }
@@ -862,18 +1271,26 @@ func addBackupEntry(tw *tar.Writer, e backupEntry) error {
 	return nil
 }
 
-// openBackup opens a .tar.xz; close must be called when done.
+// openBackup opens a .tar.zst; closeFn must be called when done: it closes the zstd decoder (which
+// runs goroutines) and the file, and is safe to call more than once.
 func openBackup(path string) (tr *tar.Reader, closeFn func(), err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	xr, err := xz.NewReader(f)
+	zr, err := zstd.NewReader(f)
 	if err != nil {
+		// NewReader can return a decoder together with the error: release it too.
+		if zr != nil {
+			zr.Close()
+		}
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("%s no es un archivo xz válido: %w", filepath.Base(path), err)
+		return nil, nil, fmt.Errorf("%s no es un archivo zstd válido: %w", filepath.Base(path), err)
 	}
-	return tar.NewReader(xr), func() { _ = f.Close() }, nil
+	return tar.NewReader(zr), func() {
+		zr.Close()
+		_ = f.Close()
+	}, nil
 }
 
 // readBackupInfo reads the info.txt (always the first entry) of a backup.
@@ -897,6 +1314,33 @@ func readBackupInfo(path string) (backupInfo, error) {
 	return info, nil
 }
 
+// readBackupManifest reads the manifest.txt (always the second entry, after info.txt) of a backup.
+func readBackupManifest(path string) ([]manifestEntry, error) {
+	tr, closeFn, err := openBackup(path)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
+	base := filepath.Base(path)
+	for _, want := range []string{backupInfoFile, backupManifestFile} {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%s no contiene %s: no es un backup válido", base, want)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("no se pudo leer %s: %w", base, err)
+		}
+		if hdr.Name != want {
+			return nil, fmt.Errorf("%s no es un backup válido: se esperaba %s y hay %s", base, want, hdr.Name)
+		}
+	}
+	manifest, err := parseManifest(tr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", base, err)
+	}
+	return manifest, nil
+}
+
 // backupFile is a backup found in a directory.
 type backupFile struct {
 	Path string
@@ -904,8 +1348,9 @@ type backupFile struct {
 	Info backupInfo
 }
 
-// listBackups returns the backups in dir (files named lodan_backup_*.<kind>.tar.xz), sorted from
-// oldest to newest by the creation time stored in their info.txt.
+// listBackups returns the backups in dir (files named lodan_backup_*.<kind>.tar.zst), sorted from
+// oldest to newest by the creation time stored in their info.txt. Directories are skipped, so the
+// staging directories of a backup in progress (or interrupted) are never listed.
 func listBackups(dir string) ([]backupFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -939,34 +1384,27 @@ func listBackups(dir string) ([]backupFile, error) {
 	return out, nil
 }
 
-// findLastBackup returns the newest backup in dir whose kind is one of kinds. ok is false if
-// there is none (or dir does not exist).
-func findLastBackup(dir string, kinds ...string) (last backupFile, ok bool, err error) {
+// referenceBackup returns the backup that a new backup of kind "incr" or "diff" is relative to:
+// the newest full backup in dir for a differential one, the newest backup of any kind for an
+// incremental one. It fails if dir has no full backup.
+func referenceBackup(dir, kind string) (backupFile, error) {
 	list, err := listBackups(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return backupFile{}, false, nil
-	}
 	if err != nil {
-		return backupFile{}, false, err
+		return backupFile{}, err
 	}
-	for i := len(list) - 1; i >= 0; i-- {
-		for _, k := range kinds {
-			if list[i].Kind == k {
-				return list[i], true, nil
-			}
+	lastFull := -1
+	for i, b := range list {
+		if b.Kind == "full" {
+			lastFull = i
 		}
 	}
-	return backupFile{}, false, nil
-}
-
-// findLastFullBackup returns the path of the newest .full.tar.xz in destDir, or "" if there is
-// none.
-func findLastFullBackup(destDir string) (string, error) {
-	last, ok, err := findLastBackup(destDir, "full")
-	if err != nil || !ok {
-		return "", err
+	if lastFull < 0 {
+		return backupFile{}, fmt.Errorf("no hay ningún backup full en %s: haz primero uno con `lodan db backup --full`", dir)
 	}
-	return last.Path, nil
+	if kind == "diff" {
+		return list[lastFull], nil
+	}
+	return list[len(list)-1], nil
 }
 
 // AutoDetectBackups scans dirPath for backups and returns the files to restore, in order: the
@@ -987,7 +1425,7 @@ func AutoDetectBackups(dirPath string) ([]string, error) {
 		}
 	}
 	if lastFull < 0 {
-		return nil, fmt.Errorf("no hay ningún backup full (lodan_backup_*.full.tar.xz) en %s: sin él no se puede restaurar", dirPath)
+		return nil, fmt.Errorf("no hay ningún backup full (lodan_backup_*.full.tar.zst) en %s: sin él no se puede restaurar", dirPath)
 	}
 	paths := make([]string, 0, len(list)-lastFull)
 	for _, b := range list[lastFull:] {
@@ -1005,7 +1443,7 @@ func validateRestoreChain(files []string) ([]backupInfo, error) {
 		base := filepath.Base(f)
 		m := backupNameRe.FindStringSubmatch(base)
 		if m == nil {
-			return nil, fmt.Errorf("%s no parece un backup de lodan (se espera lodan_backup_AAAA-MM-DD_HHMMSS.<full|incr|diff>.tar.xz)", base)
+			return nil, fmt.Errorf("%s no parece un backup de lodan (se espera lodan_backup_AAAA-MM-DD_HHMMSS.<full|incr|diff>.tar.zst)", base)
 		}
 		info, err := readBackupInfo(f)
 		if err != nil {
@@ -1017,7 +1455,7 @@ func validateRestoreChain(files []string) ([]backupInfo, error) {
 		infos[i] = info
 	}
 	if infos[0].Kind != "full" {
-		return nil, fmt.Errorf("el primer archivo debe ser un backup full (.full.tar.xz) y es %s: sin un full no se puede restaurar", filepath.Base(files[0]))
+		return nil, fmt.Errorf("el primer archivo debe ser un backup full (.full.tar.zst) y es %s: sin un full no se puede restaurar", filepath.Base(files[0]))
 	}
 	for i := 1; i < len(infos); i++ {
 		base := filepath.Base(files[i])
@@ -1035,6 +1473,12 @@ func validateRestoreChain(files []string) ([]backupInfo, error) {
 			}
 		}
 		if !found {
+			// The reference may be in the list but later: then the order is wrong.
+			for k := i + 1; k < len(infos); k++ {
+				if infos[k].CreatedAt.Equal(infos[i].Since) {
+					return nil, fmt.Errorf("orden incorrecto: %s parte de %s, que aparece más adelante en la lista; pásalos de más antiguo a más reciente", base, filepath.Base(files[k]))
+				}
+			}
 			return nil, fmt.Errorf("%s parte de un backup (%s) que no está en la lista: falta un archivo en la cadena", base, infos[i].Since.Format(time.RFC3339))
 		}
 	}
@@ -1045,11 +1489,21 @@ func validateRestoreChain(files []string) ([]backupInfo, error) {
 // incremental and differential ones, from oldest to newest (see validateRestoreChain). config.json
 // and secret are taken from the full backup. The cluster does not need to exist.
 //
-// The backups are extracted to a temporary directory and swapped in only if they are complete.
-// The cluster that was there is kept as pg.pre-restore-<date> next to it and its path is
+// The backups are extracted to a temporary directory and swapped in only if they are complete:
+// whatever the manifest of the newest backup does not list is deleted from it (files that were
+// deleted since the full backup), and every entry of that manifest must be there with the same
+// type and size, or the restore is aborted before touching the current cluster (see
+// stageBackups). The cluster that was there is kept as pg.pre-restore-<date> next to it and its path is
 // returned (empty if there was none): the caller decides when to delete it. If PostgreSQL does
 // not start or accept connections after the swap, the previous cluster, secret and config.json
 // are put back and an error is returned. PostgreSQL is left running.
+//
+// With the service supervisor active (SupervisorActive when the restore starts), PostgreSQL stays
+// under its management: the restore starts its own PostgreSQL and verifies it as above (still
+// under the lock), then stops it, releases the lock and waits (up to restartTimeout) for the
+// supervisor to start it again as its child. If it does not, Restore starts it itself and returns
+// an error saying so. The same hand-over applies when a failed restore went back to the previous
+// state with PostgreSQL having been running.
 func (c *Cluster) Restore(ctx context.Context, files []string) (previous string, err error) {
 	if len(files) == 0 {
 		return "", errors.New("no se ha indicado ningún backup que restaurar")
@@ -1057,7 +1511,18 @@ func (c *Cluster) Restore(ctx context.Context, files []string) (previous string,
 	if _, err := validateRestoreChain(files); err != nil {
 		return "", err
 	}
+	handoff := false
+	previous, err = c.restoreLocked(ctx, files, &handoff)
+	if handoff {
+		// The lock is already released.
+		err = errors.Join(err, c.awaitSupervisorStart(ctx))
+	}
+	return previous, err
+}
 
+// restoreLocked is Restore under the cluster lock, which it releases when it returns. It sets
+// *handoff when PostgreSQL has been left stopped for the service supervisor to start.
+func (c *Cluster) restoreLocked(ctx context.Context, files []string, handoff *bool) (previous string, err error) {
 	unlock, err := c.Lock(ctx)
 	if err != nil {
 		return "", err
@@ -1066,6 +1531,7 @@ func (c *Cluster) Restore(ctx context.Context, files []string) (previous string,
 	stopKeepAlive := c.keepLockAlive()
 	defer stopKeepAlive()
 
+	supervised := c.SupervisorActive()
 	wasRunning, err := c.Status(ctx)
 	if err != nil {
 		return "", err
@@ -1079,6 +1545,10 @@ func (c *Cluster) Restore(ctx context.Context, files []string) (previous string,
 	defer func() {
 		// Any failure leaves things as they were, including a PostgreSQL that was running.
 		if !succeeded && wasRunning {
+			if supervised {
+				*handoff = true
+				return
+			}
 			if serr := c.startDetached(ctx); serr != nil {
 				err = errors.Join(err, fmt.Errorf("no se pudo reiniciar PostgreSQL: %w", serr))
 			}
@@ -1092,10 +1562,8 @@ func (c *Cluster) Restore(ctx context.Context, files []string) (previous string,
 	}
 	defer os.RemoveAll(staging)
 
-	for i, f := range files {
-		if err := extractBackup(f, staging, i == 0); err != nil {
-			return "", fmt.Errorf("no se pudo extraer %s: %w", filepath.Base(f), err)
-		}
+	if err := stageBackups(files, staging); err != nil {
+		return "", err
 	}
 	stagedPG := filepath.Join(staging, backupPGEntry)
 	if _, err := os.Stat(filepath.Join(stagedPG, "PG_VERSION")); err != nil {
@@ -1168,6 +1636,16 @@ func (c *Cluster) Restore(ctx context.Context, files []string) (previous string,
 		return "", fmt.Errorf("la restauración falló y se ha vuelto al estado anterior: %w (log de PostgreSQL en %s)", err, filepath.Join(c.cfg.LogsDir(), "postgres.log"))
 	}
 	succeeded = true
+	if supervised {
+		// Verified: PostgreSQL goes back to the supervisor, which starts it as its child once
+		// the lock is released (Restore waits for that).
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
+		defer cancel()
+		if serr := c.Stop(sctx); serr != nil {
+			return previous, fmt.Errorf("la restauración terminó bien, pero no se pudo parar PostgreSQL para devolvérselo al servicio de lodan: %w", serr)
+		}
+		*handoff = true
+	}
 	return previous, nil
 }
 
@@ -1188,6 +1666,101 @@ func (c *Cluster) verifyConnection(ctx context.Context) error {
 	var one int
 	if err := conn.QueryRow(vctx, "SELECT 1").Scan(&one); err != nil {
 		return fmt.Errorf("PostgreSQL arrancó pero no responde consultas: %w", err)
+	}
+	return nil
+}
+
+// stageBackups unpacks the chain files (already validated) into staging, from oldest to newest,
+// and then makes pg/ match the manifest of the last backup (see applyManifest).
+func stageBackups(files []string, staging string) error {
+	// The manifest is read first: a backup without a valid one fails before extracting anything.
+	last := files[len(files)-1]
+	manifest, err := readBackupManifest(last)
+	if err != nil {
+		return err
+	}
+	for i, f := range files {
+		if err := extractBackup(f, staging, i == 0); err != nil {
+			return fmt.Errorf("no se pudo extraer %s: %w", filepath.Base(f), err)
+		}
+	}
+	stagedPG := filepath.Join(staging, backupPGEntry)
+	if _, err := os.Stat(stagedPG); err != nil {
+		return errors.New("los backups no contienen un clúster de PostgreSQL válido (falta pg/)")
+	}
+	if err := applyManifest(stagedPG, manifest); err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(last), err)
+	}
+	return nil
+}
+
+// applyManifest makes the extracted cluster stagedPG match manifest: it deletes every file and
+// directory the manifest does not list and then checks that every entry of the manifest exists
+// with the same type and, for files, the same size. If something is missing or does not match it
+// returns an error describing the first problems; stagedPG is a temporary copy, so deleting from
+// it is harmless.
+func applyManifest(stagedPG string, manifest []manifestEntry) error {
+	want := make(map[string]manifestEntry, len(manifest))
+	for _, e := range manifest {
+		want[e.Path] = e
+	}
+
+	err := filepath.WalkDir(stagedPG, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(stagedPG, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if _, ok := want[filepath.ToSlash(rel)]; ok {
+			return nil
+		}
+		if d.IsDir() {
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+			return filepath.SkipDir
+		}
+		return os.Remove(path)
+	})
+	if err != nil {
+		return fmt.Errorf("no se pudo depurar el clúster extraído: %w", err)
+	}
+
+	const maxReported = 5
+	problems := 0
+	var first []string
+	report := func(format string, args ...any) {
+		problems++
+		if len(first) < maxReported {
+			first = append(first, fmt.Sprintf(format, args...))
+		}
+	}
+	for _, e := range manifest {
+		fi, err := os.Lstat(filepath.Join(stagedPG, filepath.FromSlash(e.Path)))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			report("falta %s", e.Path)
+		case err != nil:
+			return fmt.Errorf("no se pudo comprobar %s: %w", e.Path, err)
+		case e.Dir && !fi.IsDir():
+			report("%s debería ser un directorio", e.Path)
+		case !e.Dir && !fi.Mode().IsRegular():
+			report("%s debería ser un archivo", e.Path)
+		case !e.Dir && fi.Size() != e.Size:
+			report("%s mide %d bytes y el manifiesto dice %d", e.Path, fi.Size(), e.Size)
+		}
+	}
+	if problems > 0 {
+		more := ""
+		if problems > len(first) {
+			more = fmt.Sprintf(" (y %d más)", problems-len(first))
+		}
+		return fmt.Errorf("los backups no cuadran con su manifiesto (%s), la cadena está incompleta o dañada: %s%s", backupManifestFile, strings.Join(first, "; "), more)
 	}
 	return nil
 }
@@ -1216,7 +1789,7 @@ func extractBackup(archive, staging string, withExtras bool) error {
 			}
 		}
 		switch {
-		case name == backupInfoFile:
+		case name == backupInfoFile || name == backupManifestFile:
 			continue
 		case name == "config.json" || name == "secret":
 			if !withExtras {

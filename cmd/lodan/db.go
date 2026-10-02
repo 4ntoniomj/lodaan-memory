@@ -165,8 +165,8 @@ func runDBBackup(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("db backup", "lodan db backup [--to destino] [--full|--incremental|--differential]", stderr)
 	to := fs.String("to", os.TempDir(), "directorio donde se crea el backup (por defecto el temporal del sistema, /tmp en Linux)")
 	full := fs.Bool("full", false, "backup completo (es el tipo por defecto)")
-	incr := fs.Bool("incremental", false, "solo los cambios desde el último backup full del destino")
-	diff := fs.Bool("differential", false, "solo los cambios desde el último backup full o differential del destino")
+	incr := fs.Bool("incremental", false, "solo los cambios desde el último backup del destino, de cualquier tipo (requiere un full previo)")
+	diff := fs.Bool("differential", false, "solo los cambios desde el último backup full del destino (requiere un full previo)")
 	if code, done := parseFlags(fs, args); done {
 		return code
 	}
@@ -233,18 +233,18 @@ func (p *pathList) Set(v string) error {
 	return nil
 }
 
-// runDBRestore implements `lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...]` and
+// runDBRestore implements `lodan db restore --from archivo1.tar.zst [archivo2.tar.zst ...]` and
 // `lodan db restore --from /carpeta`.
 func runDBRestore(args []string, stdout, stderr io.Writer) int {
-	fs := newFlagSet("db restore", "lodan db restore --from archivo1.tar.xz [archivo2.tar.xz ...] | --from /carpeta", stderr)
+	fs := newFlagSet("db restore", "lodan db restore --from archivo1.tar.zst [archivo2.tar.zst ...] | --from /carpeta", stderr)
 	var from pathList
-	fs.Var(&from, "from", "backup .tar.xz (pueden seguir más archivos, del más antiguo al más reciente) o carpeta: se restaura el último full y los backups posteriores")
+	fs.Var(&from, "from", "backup .tar.zst (pueden seguir más archivos, del más antiguo al más reciente) o carpeta: se restaura el último full y los backups posteriores")
 	if code, done := parseFlags(fs, args); done {
 		return code
 	}
 	inputs := append([]string(from), fs.Args()...)
 	if len(inputs) == 0 {
-		fmt.Fprintln(stderr, "lodan db restore: falta --from (un archivo .tar.xz, varios o una carpeta)")
+		fmt.Fprintln(stderr, "lodan db restore: falta --from (un archivo .tar.zst, varios o una carpeta)")
 		return 2
 	}
 
@@ -295,6 +295,10 @@ func runDBRestore(args []string, stdout, stderr io.Writer) int {
 
 	previous, err := cluster.Restore(ctx, files)
 	if err != nil {
+		if previous != "" {
+			// The restore itself worked (the error is about handing PostgreSQL back to the service).
+			fmt.Fprintf(stdout, "El clúster anterior se ha conservado en %s\n", previous)
+		}
 		fmt.Fprintf(stderr, "lodan db restore: %v\n", err)
 		return 1
 	}
