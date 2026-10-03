@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"lodan/internal/config"
@@ -91,10 +94,34 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// teeLog duplicates stdout and stderr into the file at path (appending), for the elevated
+// commands whose window closes when they end: the installer reads the file afterwards. With an
+// empty path nothing changes. If the file cannot be opened it warns on stderr and goes on without
+// it, because the work of the command matters more than its log. The returned function closes
+// the file.
+func teeLog(path string, stdout, stderr io.Writer) (io.Writer, io.Writer, func()) {
+	if path == "" {
+		return stdout, stderr, func() {}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		if mkErr := os.MkdirAll(filepath.Dir(path), 0o700); mkErr == nil {
+			f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "aviso: no se pudo abrir el log %s: %v\n", path, err)
+		return stdout, stderr, func() {}
+	}
+	// The file goes first: if the console fails, the log still gets the text.
+	return io.MultiWriter(f, stdout), io.MultiWriter(f, stderr), func() { _ = f.Close() }
+}
+
 // runServiceInstall implements the internal `lodan service install`, run elevated by `lodan install`.
 func runServiceInstall(args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("service install", "lodan service install --data-dir <dir> [--user <u>] [--home <dir>] [--ollama-exe <ruta> --ollama-dir <dir>]", stderr)
+	flags := newFlagSet("service install", "lodan service install --data-dir <dir> [--user <u>] [--home <dir>] [--ollama-exe <ruta> --ollama-dir <dir>] [--log <archivo>]", stderr)
 	var p install.ServiceParams
+	logFile := flags.String("log", "", "archivo donde se escribe también la salida y el error")
 	flags.StringVar(&p.User, "user", "", "cuenta con la que se ejecutan los servicios")
 	flags.StringVar(&p.Home, "home", "", "HOME de esa cuenta")
 	flags.StringVar(&p.DataDir, "data-dir", "", "directorio de datos de lodan")
@@ -103,6 +130,8 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if code, done := parseFlags(flags, args); done {
 		return code
 	}
+	stdout, stderr, closeLog := teeLog(*logFile, stdout, stderr)
+	defer closeLog()
 	if p.DataDir == "" {
 		fmt.Fprintln(stderr, "lodan service install: falta --data-dir")
 		return 2
@@ -127,11 +156,14 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 
 // runServiceUninstall implements the internal `lodan service uninstall`.
 func runServiceUninstall(args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("service uninstall", "lodan service uninstall [--ollama]", stderr)
+	flags := newFlagSet("service uninstall", "lodan service uninstall [--ollama] [--log <archivo>]", stderr)
 	withOllama := flags.Bool("ollama", false, "quita también el servicio lodan-ollama")
+	logFile := flags.String("log", "", "archivo donde se escribe también la salida y el error")
 	if code, done := parseFlags(flags, args); done {
 		return code
 	}
+	stdout, stderr, closeLog := teeLog(*logFile, stdout, stderr)
+	defer closeLog()
 	mgr := service.NewManager()
 	names := []string{service.DefaultName}
 	if *withOllama {

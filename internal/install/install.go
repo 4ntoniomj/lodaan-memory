@@ -741,6 +741,10 @@ func (in *Installer) stepServices(ctx context.Context) error {
 	if in.Env.GOOS != "windows" && p.User == "" {
 		return errors.New("no se pudo determinar el usuario con el que debe ejecutarse el servicio")
 	}
+	// On Windows the elevated process writes its output here, because its window closes at the
+	// end and the error would be lost.
+	logFile := in.elevatedLogFile()
+	p.LogFile = logFile
 	args := ServiceInstallArgs(p)
 	how := "sudo"
 	if in.Env.GOOS == "windows" {
@@ -757,8 +761,9 @@ func (in *Installer) stepServices(ctx context.Context) error {
 		return fmt.Errorf("no se pudo crear %s: %w", in.Cfg.LogsDir(), err)
 	}
 	in.doing("registrando los servicios %s: hacen falta permisos de administrador (%s)", strings.Join(names, ", "), how)
+	resetElevatedLog(logFile)
 	if err := in.elevate()(ctx, in.bin, args); err != nil {
-		return fmt.Errorf("no se pudo registrar el servicio: %w", err)
+		return withElevatedLog(fmt.Errorf("no se pudo registrar el servicio: %w", err), logFile)
 	}
 
 	for _, name := range names {
@@ -767,11 +772,15 @@ func (in *Installer) stepServices(ctx context.Context) error {
 		case err != nil:
 			in.warn("servicio %s: no se pudo verificar su estado: %v", name, err)
 		case st.State == service.StateNotInstalled:
-			return fmt.Errorf("el servicio %s no aparece registrado tras el paso con administrador (¿se canceló?)", name)
+			return withElevatedLog(fmt.Errorf("el servicio %s no aparece registrado tras el paso con administrador (¿se canceló?)", name), logFile)
 		case st.State == service.StateRunning:
 			in.ok("servicio %s registrado y en marcha", name)
 		default:
-			in.warn("servicio %s registrado, pero su estado es «%s»: revísalo con «lodan service status --name %s»", name, st.State, name)
+			msg := fmt.Sprintf("servicio %s registrado, pero su estado es «%s»: revísalo con «lodan service status --name %s»", name, st.State, name)
+			if text := elevatedLogText(logFile); text != "" {
+				msg += "\n  " + text
+			}
+			in.warn("%s", msg)
 		}
 	}
 	return nil

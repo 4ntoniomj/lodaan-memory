@@ -208,7 +208,8 @@ func (in *Installer) removeServices(ctx context.Context) error {
 		}
 		bin = exe
 	}
-	args := ServiceUninstallArgs(true)
+	logFile := in.elevatedLogFile()
+	args := ServiceUninstallArgs(true, logFile)
 	how := "sudo"
 	if in.Env.GOOS == "windows" {
 		how = "UAC"
@@ -220,8 +221,14 @@ func (in *Installer) removeServices(ctx context.Context) error {
 	}
 
 	in.doing("quitando los servicios %s: hacen falta permisos de administrador (%s)", strings.Join(present, ", "), how)
+	// The log dir may not exist yet on a half-removed installation; the elevated process also
+	// creates it, but then the file would belong to the administrator account.
+	if logFile != "" {
+		_ = os.MkdirAll(filepath.Dir(logFile), 0o700)
+	}
+	resetElevatedLog(logFile)
 	if err := in.elevate()(ctx, bin, args); err != nil {
-		return fmt.Errorf("no se pudieron quitar los servicios: %w", err)
+		return withElevatedLog(fmt.Errorf("no se pudieron quitar los servicios: %w", err), logFile)
 	}
 	for _, n := range present {
 		st, err := in.manager().Status(n)
@@ -231,7 +238,11 @@ func (in *Installer) removeServices(ctx context.Context) error {
 		case st.State == service.StateNotInstalled:
 			in.ok("servicio %s quitado", n)
 		default:
-			in.warn("el servicio %s sigue registrado (estado «%s»)", n, st.State)
+			msg := fmt.Sprintf("el servicio %s sigue registrado (estado «%s»)", n, st.State)
+			if text := elevatedLogText(logFile); text != "" {
+				msg += "\n  " + text
+			}
+			in.warn("%s", msg)
 		}
 	}
 	return nil

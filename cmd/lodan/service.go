@@ -32,6 +32,9 @@ func runService(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "run":
 		return runServiceRun(rest, stderr)
+	case "ollama":
+		// Internal: the process of the lodan-ollama Windows service.
+		return runServiceOllama(rest, stderr)
 	case "install":
 		return runServiceInstall(rest, stdout, stderr)
 	case "uninstall":

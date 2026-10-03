@@ -36,7 +36,14 @@ type ServiceParams struct {
 	// when no Ollama service has to be registered.
 	OllamaExe string
 	OllamaDir string
+	// LogFile, if set, is where the elevated process also writes its output and errors
+	// (`--log`). Windows only: its console window closes when it ends.
+	LogFile string
 }
+
+// OllamaLogName is the file in the logs directory that receives the output of the Ollama
+// that `lodan service ollama` wraps on Windows.
+const OllamaLogName = "ollama.log"
 
 // ServiceSpecs builds the specs of the services to register, in the order in
 // which they should be installed and started: lodan-ollama first (when there is
@@ -50,12 +57,22 @@ func ServiceSpecs(p ServiceParams, goos string) []service.Spec {
 		if p.Home != "" {
 			env["HOME"] = p.Home
 		}
+		// systemd and launchd run ollama directly. ollama.exe does not speak the protocol of
+		// the Windows SCM (error 1053 on start), so there lodan wraps it: `lodan service
+		// ollama` answers the SCM and runs `ollama serve` as its child. The environment still
+		// travels as "--env K=V" (added by the Windows manager) and the wrapper applies it.
+		ollamaExec, ollamaArgs := p.OllamaExe, []string{"serve"}
+		if goos == "windows" {
+			ollamaExec = StableBinary(p.DataDir, goos)
+			ollamaArgs = []string{"service", "ollama", "--ollama-exe", p.OllamaExe,
+				"--log", filepath.Join(logDir, OllamaLogName)}
+		}
 		specs = append(specs, service.Spec{
 			Name:        OllamaServiceName,
 			DisplayName: "lodan Ollama",
 			Description: "Ollama local de lodan (embeddings), solo en 127.0.0.1",
-			Exec:        p.OllamaExe,
-			Args:        []string{"serve"},
+			Exec:        ollamaExec,
+			Args:        ollamaArgs,
 			User:        p.User,
 			Env:         env,
 			LogDir:      logDir,
@@ -92,14 +109,21 @@ func ServiceInstallArgs(p ServiceParams) []string {
 	if p.OllamaExe != "" {
 		args = append(args, "--ollama-exe", p.OllamaExe, "--ollama-dir", p.OllamaDir)
 	}
+	if p.LogFile != "" {
+		args = append(args, "--log", p.LogFile)
+	}
 	return args
 }
 
-// ServiceUninstallArgs returns the arguments of `lodan service uninstall`.
-func ServiceUninstallArgs(withOllama bool) []string {
+// ServiceUninstallArgs returns the arguments of `lodan service uninstall`. A non-empty logFile
+// adds `--log logFile`.
+func ServiceUninstallArgs(withOllama bool, logFile string) []string {
 	args := []string{"service", "uninstall"}
 	if withOllama {
 		args = append(args, "--ollama")
+	}
+	if logFile != "" {
+		args = append(args, "--log", logFile)
 	}
 	return args
 }
