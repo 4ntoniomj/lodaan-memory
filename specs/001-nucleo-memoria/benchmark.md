@@ -1,6 +1,6 @@
 # Benchmark de lodan
 
-Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
+Generado por `lodan bench` el 2026-10-03 01:09:54 CEST.
 
 ## Entorno
 
@@ -8,8 +8,8 @@ Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
 - Núcleos: 4
 - RAM total: 7896 MB
 - Sistema: linux/amd64
-- PostgreSQL: 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1)
-- pgvector: 0.8.1
+- PostgreSQL: 18.6
+- pgvector: 0.8.6
 
 ## Parámetros
 
@@ -17,8 +17,8 @@ Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
 - Candidatos del índice binario (Q1): 100, 200, 400; Q2 devuelve hasta 40
 - `hnsw.ef_search` = max(candidatos, 40), como `memory.Nearest`
 - HNSW: `m` = 16 y `ef_construction` = 64 (valores por defecto de pgvector; la migración no los fija)
-- `maintenance_work_mem`: no aplica, los datos y los índices se reutilizaron
-- Escalas (filas): 1000000 (**datos reutilizados**: no se cargó nada ni se reconstruyeron los índices HNSW y GIN; solo se midió la última escala)
+- `maintenance_work_mem` = 1GB al construir los índices
+- Escalas (filas): 10000, 100000, 1000000, 10000000
 - Consultas medidas por escala: 500, tras 20 de calentamiento
 - Consultas para el recall@10: 100
 - Clústeres de vectores: 2000; temas: 1000; semilla: 42
@@ -29,31 +29,61 @@ Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
 
 | Filas | Carga (s) | Índice HNSW (s) | Índice GIN (s) | Tabla (MB) | HNSW (MB) | GIN (MB) | Total con índices (MB) | RAM postgres (MB) |
 |---|---|---|---|---|---|---|---|---|
-| 1000000 |  |  |  | 1121.5 | 379.5 | 70.8 | 3257.8 | 1220.5 |
+| 10000 | 2.08 | 2.45 | 0.07 | 11.5 | 3.8 | 1.0 | 33.3 | 189.1 |
+| 100000 | 23.88 | 24.85 | 0.52 | 112.5 | 38.0 | 9.1 | 328.5 | 976.4 |
+| 1000000 | 197.95 | 210.37 | 5.61 | 1121.5 | 379.5 | 70.7 | 3257.7 | 1744.9 |
+| 10000000 | 2393.28 | 37026.26 | 72.57 | 11208.0 | 3791.6 | 674.4 | 32536.7 | 1728.8 |
 
 ### recall@10
 
 | Filas | Candidatos | `hnsw.ef_search` | recall@10 |
 |---|---|---|---|
-| 1000000 | 100 | 100 | 0.502 |
-| 1000000 | 200 | 200 | 0.736 |
-| 1000000 | 400 | 400 | 0.893 |
+| 10000 | 100 | 100 | 0.682 |
+| 10000 | 200 | 200 | 0.761 |
+| 10000 | 400 | 400 | 0.842 |
+| 100000 | 100 | 100 | 0.999 |
+| 100000 | 200 | 200 | 0.999 |
+| 100000 | 400 | 400 | 0.999 |
+| 1000000 | 100 | 100 | 0.460 |
+| 1000000 | 200 | 200 | 0.721 |
+| 1000000 | 400 | 400 | 0.877 |
+| 10000000 | 100 | 100 | 0.154 |
+| 10000000 | 200 | 200 | 0.269 |
+| 10000000 | 400 | 400 | 0.405 |
 
 ### Latencia p50 / p95 (ms)
 
 | Filas | Candidatos | Q1 candidatos | Q2 reordenación | Q3 texto | Q4 ficha de tema | Total |
 |---|---|---|---|---|---|---|
-| 1000000 | 100 | 7.6 / 11.9 | 2.0 / 2.7 | 30.8 / 54.3 | 1.5 / 12.2 | 44.9 / 74.9 |
-| 1000000 | 200 | 11.1 / 19.0 | 3.4 / 4.0 | 30.8 / 54.3 | 1.5 / 12.2 | 50.6 / 77.4 |
-| 1000000 | 400 | 18.0 / 29.1 | 6.1 / 7.4 | 30.8 / 54.3 | 1.5 / 12.2 | 60.5 / 87.8 |
+| 10000 | 100 | 2.1 / 2.8 | 1.2 / 1.6 | 1.7 / 3.0 | 0.6 / 0.7 | 5.7 / 7.3 |
+| 10000 | 200 | 3.5 / 4.3 | 1.8 / 2.4 | 1.7 / 3.0 | 0.6 / 0.7 | 7.8 / 9.4 |
+| 10000 | 400 | 5.8 / 6.8 | 3.1 / 3.8 | 1.7 / 3.0 | 0.6 / 0.7 | 11.4 / 13.2 |
+| 100000 | 100 | 3.1 / 4.0 | 1.3 / 1.8 | 14.9 / 16.7 | 0.7 / 0.8 | 20.2 / 22.3 |
+| 100000 | 200 | 5.3 / 6.4 | 2.2 / 2.8 | 14.9 / 16.7 | 0.7 / 0.8 | 23.3 / 25.8 |
+| 100000 | 400 | 9.5 / 11.0 | 3.9 / 4.7 | 14.9 / 16.7 | 0.7 / 0.8 | 29.3 / 32.2 |
+| 1000000 | 100 | 7.2 / 12.3 | 1.9 / 2.3 | 27.2 / 33.9 | 1.2 / 7.1 | 38.3 / 69.1 |
+| 1000000 | 200 | 10.2 / 16.8 | 3.1 / 3.6 | 27.2 / 33.9 | 1.2 / 7.1 | 43.4 / 56.6 |
+| 1000000 | 400 | 15.7 / 25.9 | 5.5 / 6.0 | 27.2 / 33.9 | 1.2 / 7.1 | 51.2 / 66.9 |
+| 10000000 | 100 | 272.5 / 751.9 | 20.4 / 30.5 | 203.1 / 282.0 | 1.6 / 33.5 | 511.6 / 1016.9 |
+| 10000000 | 200 | 132.9 / 160.5 | 4.2 / 5.8 | 203.1 / 282.0 | 1.6 / 33.5 | 350.8 / 443.2 |
+| 10000000 | 400 | 278.6 / 412.9 | 8.5 / 15.7 | 203.1 / 282.0 | 1.6 / 33.5 | 503.3 / 666.0 |
 
 ### Latencia p99 (ms)
 
 | Filas | Candidatos | Q1 candidatos | Q2 reordenación | Q3 texto | Q4 ficha de tema | Total |
 |---|---|---|---|---|---|---|
-| 1000000 | 100 | 118.0 | 3.3 | 68.4 | 27.0 | 158.7 |
-| 1000000 | 200 | 21.8 | 4.5 | 68.4 | 27.0 | 99.8 |
-| 1000000 | 400 | 37.2 | 9.4 | 68.4 | 27.0 | 110.3 |
+| 10000 | 100 | 3.0 | 1.8 | 4.1 | 0.8 | 8.6 |
+| 10000 | 200 | 4.5 | 2.6 | 4.1 | 0.8 | 10.2 |
+| 10000 | 400 | 7.3 | 4.0 | 4.1 | 0.8 | 14.4 |
+| 100000 | 100 | 4.3 | 2.1 | 20.2 | 1.0 | 25.1 |
+| 100000 | 200 | 7.8 | 3.5 | 20.2 | 1.0 | 28.4 |
+| 100000 | 400 | 14.3 | 5.1 | 20.2 | 1.0 | 35.6 |
+| 1000000 | 100 | 162.7 | 2.6 | 43.3 | 32.9 | 203.9 |
+| 1000000 | 200 | 18.2 | 3.8 | 43.3 | 32.9 | 77.8 |
+| 1000000 | 400 | 29.3 | 6.2 | 43.3 | 32.9 | 86.2 |
+| 10000000 | 100 | 1070.4 | 37.2 | 354.2 | 54.8 | 1418.3 |
+| 10000000 | 200 | 186.8 | 8.1 | 354.2 | 54.8 | 500.1 |
+| 10000000 | 400 | 512.3 | 19.3 | 354.2 | 54.8 | 762.5 |
 
 ### Índices de la ficha del tema
 
@@ -61,13 +91,16 @@ Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
 
 | Filas | ProfileSQL (`memory_topics_profile_idx`) | EventsSQL (`memory_topics_events_idx`) |
 |---|---|---|
+| 10000 | sí | sí |
+| 100000 | sí | sí |
 | 1000000 | sí | sí |
+| 10000000 | sí | sí |
 
 ## Embedding real de una consulta
 
 | Modelo | Consultas | p50 (ms) | p95 (ms) |
 |---|---|---|---|
-| embeddinggemma:300m-qat-q4_0 | 30 | 39.3 | 84.7 |
+| embeddinggemma:300m-qat-q4_0 | 30 | 102.3 | 218.6 |
 
 ## Notas
 
@@ -79,6 +112,5 @@ Generado por `lodan bench` el 2026-09-29 16:41:11 CEST.
 - **Latencias.** Cada consulta se mide con el reloj del cliente, incluida la ida y vuelta local con PostgreSQL. Q1 y Q2 se miden para cada número de candidatos; Q3 y Q4 no dependen de él y se miden una sola vez por escala (por eso se repiten en las filas de una misma escala). «Total» es la suma por repetición de Q1 + Q2 + Q3 + Q4. Q4 son dos consultas: hasta 8 datos estables y hasta 5 eventos.
 - **Texto.** Los textos salen de un vocabulario español de unas 295 palabras, así que cada palabra aparece en una fracción grande de las filas. Las consultas de vocabulario de Q3 son siempre de 2 palabras distintas, que `websearch_to_tsquery` combina con AND, de modo que cada consulta encuentra solo las filas que contienen ambas. El 10 % de las consultas de texto buscan en cambio un token exacto tipo matrícula (`1234-ABC`), presente en el 1 % de las filas. El ranking se calcula como máximo sobre 2000 coincidencias (`recall.TextRankCap`).
 - **Carga por escalas.** Las escalas crecen de forma incremental: se añaden filas hasta llegar a cada tamaño. Antes de cada carga se eliminan el índice HNSW y el GIN de `tsv`, y se recrean después con la misma definición de la migración. Los índices de `memory_topics` no se tocan: se mantienen durante la carga y se hace `ANALYZE` al final.
-- **Datos reutilizados.** No se cargó nada ni se reconstruyeron los índices HNSW y GIN, por eso los tiempos de carga y de construcción están vacíos. Se ejecutaron las migraciones (que crean los índices de `memory_topics` si faltaban) y `ANALYZE`.
 - **RAM.** Suma del RSS de los procesos de PostgreSQL del clúster (solo en Linux). Como cuenta la memoria compartida una vez por cada proceso que la ha tocado, sobrestima el uso real.
 - **Base de datos.** Todo se ejecuta en la base `lodan_bench`, separada de la de datos reales.

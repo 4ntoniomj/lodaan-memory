@@ -50,8 +50,8 @@
 ## Fase 4 — Rendimiento
 
 - [x] 13. [P] Paquete `internal/benchmark` + `lodan bench --rows ...`: generador sintético, carga con COPY, construcción del índice, mediciones e informe markdown. Se puede empezar en cuanto esté la tarea 6.
-- [ ] 14. Ejecutar el benchmark a 10 mil, 100 mil y 1 millón:
-  > Parcial: 10 mil, 100 mil y 1 millón medidos (resultados iniciales en el commit 80276d6; optimizados en benchmark.md); umbrales calibrados (calibracion.md); 400 candidatos por defecto. Pendiente: ejecución a 10 millones (varias horas).
+- [x] 14. Ejecutar el benchmark a 10 mil, 100 mil y 1 millón:
+  > Hecho el 2026-10-03: las cuatro escalas (10 mil, 100 mil, 1 millón y 10 millones) regeneradas en benchmark.md en un clúster aparte. A 10 millones no se cumple O1 en la máquina de referencia: ver verificacion.md.
   - escribir `specs/001-nucleo-memoria/benchmark.md`;
   - calibrar `dup_similarity` y `topic_similarity` con el modelo real;
   - ajustar los parámetros del índice si hace falta;
@@ -60,4 +60,5 @@
 ## Fase 5 — Cierre
 
 - [x] 15. Test de integración de paráfrasis con Ollama real (criterio 9, se salta si no hay Ollama) y comprobación de seguridad del clúster (criterio 19).
-- [ ] 16. Verificación de sdd contra la spec, auditoría de screaming-architecture, `detectar_stack.py --comparar CODEBASE.md`, `go vet` y commits Conventional Commits en `feat/nucleo-memoria`.
+- [x] 16. Verificación de sdd contra la spec, auditoría de screaming-architecture, `detectar_stack.py --comparar CODEBASE.md`, `go vet` y commits Conventional Commits en `feat/nucleo-memoria`.
+  > Verificación en verificacion.md (2026-09-29, actualizada el 2026-10-03 con el benchmark de 10 millones).
