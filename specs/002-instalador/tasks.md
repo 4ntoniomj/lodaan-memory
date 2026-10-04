@@ -24,6 +24,6 @@
 - [x] 9. Prueba de extremo a extremo en Linux con un `LODAN_DATA_DIR` y un HOME temporales (sin tocar la instalación real), y luego instalación real en la máquina del usuario.
   > Hecha el 2026-09-29: instalación real en Linux (WSL2) como servicio systemd.
 - [x] 10. Compilación cruzada para las 5 plataformas; prueba en el host Windows si el usuario lo autoriza.
-  > Compilación cruzada correcta para windows/amd64, linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64 (2026-10-03). Prueba en el Windows 11 real del usuario el 2026-10-03 con `--skip-service`; el registro del servicio (UAC) queda pendiente: ver verificacion.md.
+  > Compilación cruzada correcta para windows/amd64, linux/amd64, linux/arm64, darwin/amd64 y darwin/arm64 (2026-10-03). Prueba en el Windows 11 real del usuario el 2026-10-03 con `--skip-service` y el 2026-10-04 con UAC y servicios; quedan pendientes las pruebas como administrador: ver verificacion.md.
 - [x] 11. Verificación de sdd, auditoría, `CODEBASE.md` y commits.
   > Ver verificacion.md.
