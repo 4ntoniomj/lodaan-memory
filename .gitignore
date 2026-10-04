@@ -1,27 +1,6 @@
-# Binaries
-bin/
-dist/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-/memory-server
-
-# Test binaries
+/lodan
+/lodan.exe
+/dist/
 *.test
-
-# Output of the go coverage tool
-*.out
-
-# Environment variables
-.env
-.env.*
-!.env.example
-
-# IDE / Editor
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+coverage.out
+.claude/settings.local.json
