@@ -222,21 +222,72 @@ func (c *Cluster) configure() error {
 	return nil
 }
 
+// statusPingTimeout bounds the connection that Status makes to confirm a server that
+// pg_ctl status does not see (see Status).
+const statusPingTimeout = 3 * time.Second
+
+// pgCtlStatus runs `pg_ctl status` on the cluster. It is a variable so that tests can simulate
+// a pg_ctl that cannot see a postmaster that is running.
+var pgCtlStatus = func(ctx context.Context, c *Cluster) (string, error) {
+	return c.run(ctx, "pg_ctl", "status", "-D", c.cfg.PGDataDir())
+}
+
 // Status reports whether the server is running (pg_ctl status: exit 0 = running, 3 = not
 // running, 4 = no data directory, which is also reported as not running).
+//
+// pg_ctl is not always right. On Windows the service runs `lodan service run` as LocalSystem, and
+// that process starts the postmaster; a pg_ctl launched by the regular user, without elevation,
+// cannot inspect a process owned by LocalSystem, so it answers "not running" (or fails) even
+// though postmaster.pid exists and the server accepts connections. So when pg_ctl does not say
+// "running" but postmaster.pid exists, Status confirms with a real authenticated connection
+// (user and password from SecretFile) to the cluster port: if it answers, the server is running.
+// Authenticating avoids mistaking for lodan's PostgreSQL whatever else occupies the port (for
+// example the WSL relay). It applies to every OS: a stale postmaster.pid with nothing listening
+// still reports "not running".
 func (c *Cluster) Status(ctx context.Context) (running bool, err error) {
-	out, err := c.run(ctx, "pg_ctl", "status", "-D", c.cfg.PGDataDir())
+	out, err := pgCtlStatus(ctx, c)
 	if err == nil {
 		return true, nil
 	}
+	notRunning := false
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		switch exitErr.ExitCode() {
 		case 3, 4:
-			return false, nil
+			notRunning = true
 		}
 	}
+	if c.hasPostmasterPid() && c.acceptsConnections(ctx) {
+		return true, nil
+	}
+	if notRunning {
+		return false, nil
+	}
 	return false, fmt.Errorf("pg_ctl status falló: %w\n%s", err, out)
+}
+
+// hasPostmasterPid reports whether the data directory has a postmaster.pid (a running server
+// or one that died without cleaning up).
+func (c *Cluster) hasPostmasterPid() bool {
+	_, err := os.Stat(filepath.Join(c.cfg.PGDataDir(), "postmaster.pid"))
+	return err == nil
+}
+
+// acceptsConnections reports whether the cluster accepts an authenticated connection to the
+// postgres database within statusPingTimeout.
+func (c *Cluster) acceptsConnections(ctx context.Context) bool {
+	dsn, err := c.DSN("postgres")
+	if err != nil {
+		return false
+	}
+	pctx, cancel := context.WithTimeout(ctx, statusPingTimeout)
+	defer cancel()
+	conn, err := pgx.Connect(pctx, dsn)
+	if err != nil {
+		return false
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	return conn.Ping(pctx) == nil
 }
 
 // Start starts the server and waits until it accepts connections. It does nothing if the
