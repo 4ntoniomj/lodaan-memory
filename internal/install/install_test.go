@@ -657,8 +657,8 @@ func TestCopyExecutable(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "origen")
 	dst := filepath.Join(t.TempDir(), "bin", "lodan")
 	clWrite(t, src, "uno\n")
-	if err := copyExecutable(src, dst); err != nil {
-		t.Fatal(err)
+	if movedTo, err := copyExecutable(src, dst); err != nil || movedTo != "" {
+		t.Fatalf("copyExecutable = (%q, %v)", movedTo, err)
 	}
 	if clRead(t, dst) != "uno\n" {
 		t.Fatal("contenido incorrecto")
@@ -669,8 +669,8 @@ func TestCopyExecutable(t *testing.T) {
 		}
 	}
 	clWrite(t, src, "dos\n")
-	if err := copyExecutable(src, dst); err != nil {
-		t.Fatal(err)
+	if movedTo, err := copyExecutable(src, dst); err != nil || movedTo != "" {
+		t.Fatalf("copyExecutable = (%q, %v)", movedTo, err)
 	}
 	if clRead(t, dst) != "dos\n" {
 		t.Fatal("debe sobrescribir el destino")
@@ -678,6 +678,192 @@ func TestCopyExecutable(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Dir(dst))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("no deben quedar archivos temporales: %v %v", entries, err)
+	}
+}
+
+// simulateBinaryInUse makes the rename of the temporary file over dst fail while dst exists, as
+// Windows does when dst is a running executable. Renaming dst itself keeps working (Windows allows
+// renaming a running executable), and once dst has been moved aside the temporary file can take
+// its place.
+func simulateBinaryInUse(t *testing.T, dst string) {
+	t.Helper()
+	orig := renameFile
+	renameFile = func(oldpath, newpath string) error {
+		if newpath == dst && strings.HasPrefix(filepath.Base(oldpath), ".lodan-") {
+			if _, err := os.Lstat(dst); err == nil {
+				return errors.New("el archivo está en uso por otro proceso")
+			}
+		}
+		return orig(oldpath, newpath)
+	}
+	t.Cleanup(func() { renameFile = orig })
+}
+
+func TestCopyExecutableEnUsoMueveElAnteriorAOld(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "origen")
+	dst := filepath.Join(dir, "bin", "lodan")
+	clWrite(t, src, "nuevo\n")
+	clWrite(t, dst, "viejo\n")
+	simulateBinaryInUse(t, dst)
+
+	movedTo, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedTo != dst+".old" {
+		t.Fatalf("el anterior debe ir a %s.old, y fue a %q", dst, movedTo)
+	}
+	if clRead(t, dst) != "nuevo\n" || clRead(t, dst+".old") != "viejo\n" {
+		t.Fatalf("contenido tras la sustitución: dst=%q old=%q", clRead(t, dst), clRead(t, dst+".old"))
+	}
+	entries, err := os.ReadDir(filepath.Dir(dst))
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("solo deben quedar el binario y el .old: %v %v", entries, err)
+	}
+}
+
+func TestCopyExecutableReemplazaUnOldPrevio(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "origen")
+	dst := filepath.Join(dir, "bin", "lodan")
+	clWrite(t, src, "nuevo\n")
+	clWrite(t, dst, "viejo\n")
+	clWrite(t, dst+".old", "muy viejo\n")
+	simulateBinaryInUse(t, dst)
+
+	movedTo, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedTo != dst+".old" || clRead(t, dst) != "nuevo\n" || clRead(t, dst+".old") != "viejo\n" {
+		t.Fatalf("movedTo=%q dst=%q old=%q", movedTo, clRead(t, dst), clRead(t, dst+".old"))
+	}
+}
+
+func TestCopyExecutableOldPrevioEnUsoUsaNombreConFecha(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "origen")
+	dst := filepath.Join(dir, "bin", "lodan")
+	clWrite(t, src, "nuevo\n")
+	clWrite(t, dst, "viejo\n")
+	clWrite(t, dst+".old", "muy viejo\n")
+	simulateBinaryInUse(t, dst)
+	origRemove := removeFile
+	removeFile = func(string) error { return errors.New("en uso") }
+	t.Cleanup(func() { removeFile = origRemove })
+
+	movedTo, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(movedTo, dst+".old-") {
+		t.Fatalf("con el .old en uso debe usar un nombre con fecha, y usó %q", movedTo)
+	}
+	if clRead(t, dst) != "nuevo\n" || clRead(t, movedTo) != "viejo\n" || clRead(t, dst+".old") != "muy viejo\n" {
+		t.Fatalf("contenido: dst=%q fechado=%q old=%q", clRead(t, dst), clRead(t, movedTo), clRead(t, dst+".old"))
+	}
+}
+
+func TestCopyExecutableSinDestinoNoCreaOld(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "origen")
+	dst := filepath.Join(dir, "bin", "lodan")
+	clWrite(t, src, "nuevo\n")
+	// The rename fails for a reason other than a busy destination (there is none).
+	orig := renameFile
+	renameFile = func(oldpath, newpath string) error { return errors.New("permiso denegado") }
+	t.Cleanup(func() { renameFile = orig })
+
+	if _, err := copyExecutable(src, dst); err == nil {
+		t.Fatal("si el rename falla y no hay destino que apartar, debe devolver el error")
+	}
+	entries, _ := os.ReadDir(filepath.Dir(dst))
+	if len(entries) != 0 {
+		t.Fatalf("no debe quedar nada (ni .tmp ni .old): %v", entries)
+	}
+}
+
+func TestRemoveOldExecutables(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "lodan")
+	for _, name := range []string{"lodan", "lodan.old", "lodan.old-20260101-120000", "otro.old"} {
+		clWrite(t, filepath.Join(dir, name), "x\n")
+	}
+	removeOldExecutables(dst)
+	if pathExists(dst+".old") || pathExists(dst+".old-20260101-120000") {
+		t.Error("deben borrarse los .old")
+	}
+	if !pathExists(dst) || !pathExists(filepath.Join(dir, "otro.old")) {
+		t.Error("no debe borrar el binario ni archivos de otro nombre")
+	}
+
+	// A leftover that cannot be deleted is ignored.
+	clWrite(t, dst+".old", "x\n")
+	origRemove := removeFile
+	removeFile = func(string) error { return errors.New("en uso") }
+	t.Cleanup(func() { removeFile = origRemove })
+	removeOldExecutables(dst)
+	if !pathExists(dst + ".old") {
+		t.Error("si no se puede borrar, se deja")
+	}
+}
+
+func TestInstallBinarioEnUsoAvisaDeReiniciarLosServicios(t *testing.T) {
+	h := installedHarness(t)
+	if err := os.WriteFile(h.exe, []byte("binario nuevo\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	simulateBinaryInUse(t, h.bin())
+	if err := h.install(Options{Yes: true}); err != nil {
+		t.Fatalf("Install: %v\n%s", err, h.output())
+	}
+	if got, _ := os.ReadFile(h.bin()); string(got) != "binario nuevo\n" {
+		t.Fatalf("el binario estable debe actualizarse: %q", got)
+	}
+	if !pathExists(h.bin() + ".old") {
+		t.Error("el binario anterior debe quedar como .old")
+	}
+	if !strings.Contains(h.output(), "lodan service restart") || !strings.Contains(h.output(), "siguen con la versión anterior") {
+		t.Errorf("falta el aviso de reiniciar los servicios:\n%s", h.output())
+	}
+
+	// The next run, with nothing using the old binary, cleans it up.
+	renameFile = os.Rename
+	if err := h.install(Options{Yes: true}); err != nil {
+		t.Fatalf("Install: %v\n%s", err, h.output())
+	}
+	if pathExists(h.bin() + ".old") {
+		t.Error("el siguiente install debe borrar el .old")
+	}
+}
+
+func TestInstallPostgresYaEnMarchaNoSeArrancaNiSePara(t *testing.T) {
+	h := newHarness(t, "")
+	h.cl.initialized = true
+	h.cl.running = true
+	if err := h.install(Options{Yes: true}); err != nil {
+		t.Fatalf("Install: %v\n%s", err, h.output())
+	}
+	if h.ev.count("cluster.start") != 0 || h.ev.count("cluster.stop") != 0 {
+		t.Errorf("con PostgreSQL en marcha no se arranca ni se para: %v", h.ev.list)
+	}
+	if !h.cl.running {
+		t.Error("PostgreSQL debe seguir en marcha")
+	}
+	if h.ev.count("cluster.migrate") != 1 || strings.Contains(h.output(), "PostgreSQL de forma temporal") || strings.Contains(h.output(), "PostgreSQL temporal parado") {
+		t.Errorf("debe migrar sin mencionar un PostgreSQL temporal:\n%s", h.output())
+	}
+}
+
+func TestInstallPostgresTemporalSoloSeParaSiLoArranco(t *testing.T) {
+	h := newHarness(t, "")
+	h.cl.initialized = true
+	if err := h.install(Options{Yes: true}); err != nil {
+		t.Fatalf("Install: %v\n%s", err, h.output())
+	}
+	if h.ev.count("cluster.start") != 1 || h.ev.count("cluster.stop") != 1 {
+		t.Errorf("parado, lo arranca y lo para él: %v", h.ev.list)
 	}
 }
 

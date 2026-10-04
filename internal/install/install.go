@@ -24,7 +24,8 @@ var ErrCancelled = errors.New("cancelado por el usuario")
 
 // defaultOllamaWait is how long install waits for a freshly registered Ollama
 // service to answer before downloading the model.
-const defaultOllamaWait = 60 * time.Second
+// In a real Windows 11 test, Ollama 0.35 spent 67 s discovering the GPU (Vulkan) on its first start before answering any request.
+const defaultOllamaWait = 3 * time.Minute
 
 // Options are the flags of `lodan install`.
 type Options struct {
@@ -70,7 +71,7 @@ type Installer struct {
 	NewCluster func(cfg config.Config) (clusterAPI, error)
 	// Ollama groups the calls to Ollama (default: the functions of ollama.go).
 	Ollama ollamaAPI
-	// OllamaWait bounds the wait for Ollama after registering its service (default 60 s).
+	// OllamaWait bounds the wait for Ollama after registering its service (default 3 min).
 	OllamaWait time.Duration
 
 	reader        *bufio.Reader
@@ -396,6 +397,11 @@ func (in *Installer) stepBinary(ctx context.Context) error {
 		return fmt.Errorf("no se pudo localizar el ejecutable actual: %w", err)
 	}
 
+	// Leftovers of earlier updates (see copyExecutable): removed once nothing uses them.
+	if !in.opt.DryRun {
+		removeOldExecutables(dest)
+	}
+
 	switch {
 	case samePath(exe, dest):
 		in.ok("el binario ya estaba en su sitio: %s", dest)
@@ -405,14 +411,34 @@ func (in *Installer) stepBinary(ctx context.Context) error {
 		in.would("se copiaría %s a %s", exe, dest)
 	default:
 		in.doing("copiando el binario a %s", dest)
-		if err := copyExecutable(exe, dest); err != nil {
+		movedTo, err := copyExecutable(exe, dest)
+		if err != nil {
 			return fmt.Errorf("no se pudo copiar el binario a %s: %w", dest, err)
 		}
 		in.binUpdated = true
 		in.ok("binario copiado a %s", dest)
+		if movedTo != "" {
+			in.warn("no se pudo sobrescribir %s (en uso, seguramente por los servicios): el binario anterior queda en %s y los servicios siguen con la versión anterior hasta reiniciarlos; %s",
+				dest, movedTo, in.restartHint())
+		}
 	}
 	in.linkBinary(dest)
 	return nil
+}
+
+// restartHint is the instruction to restart the services that run the stable binary.
+func (in *Installer) restartHint() string {
+	how := "con sudo"
+	if in.Env.GOOS == "windows" {
+		how = "como administrador"
+	}
+	cmds := "«lodan service restart»"
+	// On Windows lodan-ollama runs through the wrapper `lodan service ollama`, so it also uses
+	// the stable binary.
+	if in.Env.GOOS == "windows" {
+		cmds += fmt.Sprintf(" y «lodan service restart --name %s»", OllamaServiceName)
+	}
+	return fmt.Sprintf("ejecuta %s %s", cmds, how)
 }
 
 // linkBinary creates ~/.local/bin/lodan -> dest on Unix, if ~/.local/bin exists
@@ -478,22 +504,39 @@ func sameContent(a, b string) bool {
 	return err == nil && ha == hb
 }
 
+// renameFile and removeFile are the file operations of copyExecutable; variables so that tests
+// can simulate a destination that is in use (a failing rename), which only happens on Windows.
+var (
+	renameFile = os.Rename
+	removeFile = os.Remove
+)
+
+// oldSuffix ends the name of the previous binary that copyExecutable moves aside.
+const oldSuffix = ".old"
+
 // copyExecutable copies src to dst (mode 0755) through a temporary file in the
-// same folder. If the rename fails because dst is in use (Windows), the old file
-// is moved aside first.
-func copyExecutable(src, dst string) error {
+// same folder, and renames it over dst (atomic; on Unix this works even if dst is running).
+//
+// On Windows a running executable cannot be overwritten, but it can be renamed. So if the direct
+// rename fails and dst exists, dst is moved aside to dst+".old" (an earlier ".old" is deleted
+// first; if it cannot be deleted because it is still running, a name with a date suffix is used
+// instead) and the new file takes its place. In that case it returns the path where the previous
+// binary went, so the caller can warn that whoever runs it keeps the old version until it is
+// restarted. It returns "" when the direct rename worked. removeOldExecutables deletes those
+// leftovers in a later run.
+func copyExecutable(src, dst string) (movedTo string, err error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+		return "", err
 	}
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer in.Close()
 
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".lodan-*.tmp")
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmpName := tmp.Name()
 	done := false
@@ -504,31 +547,75 @@ func copyExecutable(src, dst string) error {
 	}()
 	if _, err := io.Copy(tmp, in); err != nil {
 		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		_ = tmp.Close()
-		return err
+		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return "", err
 	}
 
-	if err := os.Rename(tmpName, dst); err != nil {
-		// A running executable cannot be overwritten on Windows, but it can be renamed.
-		old := dst + ".old"
-		_ = os.Remove(old)
-		if err2 := os.Rename(dst, old); err2 != nil {
-			return err
-		}
-		if err := os.Rename(tmpName, dst); err != nil {
-			_ = os.Rename(old, dst)
-			return err
-		}
-		_ = os.Remove(old)
+	renameErr := renameFile(tmpName, dst)
+	if renameErr == nil {
+		done = true
+		return "", nil
+	}
+
+	// The destination is probably in use (Windows): move it aside and put the new one in its place.
+	if _, err := os.Lstat(dst); err != nil {
+		return "", renameErr // nothing to move aside: the failure has another cause
+	}
+	old, err := freeOldName(dst)
+	if err != nil {
+		return "", errors.Join(renameErr, err)
+	}
+	if err := renameFile(dst, old); err != nil {
+		return "", errors.Join(renameErr, err)
+	}
+	if err := renameFile(tmpName, dst); err != nil {
+		_ = renameFile(old, dst) // put the previous binary back
+		return "", err
 	}
 	done = true
-	return nil
+	return old, nil
+}
+
+// freeOldName returns a path next to dst, free to receive the previous binary: dst+".old" if it
+// can be (an existing one is deleted), otherwise dst+".old-<date>" when the existing ".old" cannot
+// be deleted because it is still running.
+func freeOldName(dst string) (string, error) {
+	old := dst + oldSuffix
+	if _, err := os.Lstat(old); err != nil {
+		return old, nil // does not exist (or cannot be inspected: the rename will tell)
+	}
+	if err := removeFile(old); err == nil {
+		return old, nil
+	}
+	dated := old + "-" + time.Now().Format("20060102-150405")
+	if _, err := os.Lstat(dated); err == nil {
+		return "", fmt.Errorf("%s está en uso y ya existe %s", old, dated)
+	}
+	return dated, nil
+}
+
+// removeOldExecutables deletes the previous binaries that copyExecutable left next to dst
+// (dst+".old" and dst+".old-<date>"). Whatever cannot be deleted (it is still running) is left
+// for the next run, silently.
+func removeOldExecutables(dst string) {
+	entries, err := os.ReadDir(filepath.Dir(dst))
+	if err != nil {
+		return
+	}
+	base := filepath.Base(dst)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || (name != base+oldSuffix && !strings.HasPrefix(name, base+oldSuffix+"-")) {
+			continue
+		}
+		_ = removeFile(filepath.Join(filepath.Dir(dst), name))
+	}
 }
 
 // --- step 2: PostgreSQL runtime ---
@@ -834,7 +921,7 @@ func (in *Installer) stepModel(ctx context.Context) error {
 	return nil
 }
 
-// waitOllama polls Ollama until it answers or OllamaWait (60 s by default) passes.
+// waitOllama polls Ollama until it answers or OllamaWait (3 min by default) passes.
 func (in *Installer) waitOllama(ctx context.Context) bool {
 	limit := in.OllamaWait
 	if limit <= 0 {
