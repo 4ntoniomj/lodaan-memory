@@ -1,0 +1,6 @@
+/lodan
+/lodan.exe
+/dist/
+*.test
+coverage.out
+.claude/settings.local.json
