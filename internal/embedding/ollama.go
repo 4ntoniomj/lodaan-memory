@@ -137,6 +137,19 @@ func (o *Ollama) EmbedQuery(ctx context.Context, q string) ([]float32, error) {
 	return vecs[0], nil
 }
 
+// EmbedQueries embeds several search queries in one request, applying the
+// query prompt format to each.
+func (o *Ollama) EmbedQueries(ctx context.Context, qs []string) ([][]float32, error) {
+	if len(qs) == 0 {
+		return nil, nil
+	}
+	inputs := make([]string, len(qs))
+	for i, q := range qs {
+		inputs[i] = o.format.query(q)
+	}
+	return o.embed(ctx, inputs)
+}
+
 // Ping checks that the Ollama server answers on GET /api/version.
 func (o *Ollama) Ping(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/version", nil)

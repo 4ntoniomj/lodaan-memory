@@ -23,6 +23,7 @@ type prepared struct {
 	occurred       time.Time
 	hash           []byte
 	names          []string // topic names to resolve, never empty
+	relate         []RelateTo
 	topics         []topic.Resolution
 	vec            []float32 // nil when pending
 	dup            bool
@@ -35,9 +36,10 @@ type prepared struct {
 // duplicate (nothing is inserted); otherwise it is inserted with its topics.
 // An item with a key supersedes the active record with the same key. All
 // inserts run in one transaction. Afterwards, active records similar to each
-// new one (at least the duplicate threshold) get a suggested "related" relation
-// and are listed in Saved.Similar; that last step is best effort: if it fails,
-// the items are already saved and the error is not reported.
+// The relations listed in Item.Relate are created, confirmed, in the same
+// transaction; targets that do not exist are reported in
+// Saved.MissingRelations. No relation is created from similarity alone: the
+// caller decides what is related.
 //
 // If the embedding backend is unavailable, or takes longer than the embedding
 // timeout, the items are saved as pending (NULL embedding); FillPending computes
@@ -133,23 +135,6 @@ func (s *Service) Remember(ctx context.Context, tr *session.Tracker, items []Ite
 		return nil, fmt.Errorf("no se pudo confirmar el guardado: %w", err)
 	}
 
-	// 7. Parecidos: solo con embedding y sin contar lo que acaba de sustituirse.
-	replaced := make(map[int64]bool)
-	var replacedList []int64
-	for _, i := range todo {
-		for _, id := range ps[i].saved.Superseded {
-			replaced[id] = true
-			replacedList = append(replacedList, id)
-		}
-	}
-	for _, i := range todo {
-		p := &ps[i]
-		if p.dup || p.vec == nil || replaced[p.saved.ID] {
-			continue
-		}
-		exclude := append([]int64{p.saved.ID}, replacedList...)
-		p.saved.Similar = s.suggestSimilar(ctx, p.saved.ID, p.vec, exclude)
-	}
 	return collectSaved(ps), nil
 }
 
@@ -171,6 +156,10 @@ func prepareItem(it Item, now time.Time) (prepared, error) {
 	if it.OccurredAt != nil {
 		occurred = *it.OccurredAt
 	}
+	relate, err := validateRelate(it.Relate)
+	if err != nil {
+		return prepared{}, err
+	}
 
 	var names []string
 	for _, n := range it.Topics {
@@ -189,7 +178,35 @@ func prepareItem(it Item, now time.Time) (prepared, error) {
 		occurred: occurred,
 		hash:     ContentHash(content),
 		names:    names,
+		relate:   relate,
 	}, nil
+}
+
+// validateRelate checks the relation kinds of Item.Relate, applies the default
+// kind and drops repeated targets.
+func validateRelate(in []RelateTo) ([]RelateTo, error) {
+	var out []RelateTo
+	seen := make(map[RelateTo]bool, len(in))
+	for _, r := range in {
+		kind := strings.ToLower(strings.TrimSpace(r.Kind))
+		if kind == "" {
+			kind = RelationRelated
+		}
+		switch kind {
+		case RelationRelated, RelationContradicts, RelationPartOf:
+		default:
+			return nil, fmt.Errorf("relation %q no válida en relate (válidas: related, contradicts, part_of)", r.Kind)
+		}
+		if r.ID <= 0 {
+			return nil, fmt.Errorf("relate necesita un id válido y se recibió %d", r.ID)
+		}
+		rel := RelateTo{ID: r.ID, Kind: kind}
+		if !seen[rel] {
+			seen[rel] = true
+			out = append(out, rel)
+		}
+	}
+	return out, nil
 }
 
 // resolveTopics resolves the topics of the items in todo with one call to the
@@ -334,6 +351,23 @@ func (s *Service) insertItem(ctx context.Context, tx pgx.Tx, p *prepared, sessio
 			return fmt.Errorf("no se pudo crear la relación de sustitución: %w", err)
 		}
 	}
+	var related, missing []int64
+	for _, r := range p.relate {
+		var exists bool
+		if err := sp.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memories WHERE id = $1)`, r.ID).Scan(&exists); err != nil {
+			return fmt.Errorf("no se pudo comprobar el registro #%d de relate: %w", r.ID, err)
+		}
+		if !exists {
+			missing = append(missing, r.ID)
+			continue
+		}
+		if _, err := sp.Exec(ctx, `INSERT INTO memory_relations (source_id, target_id, kind, state)
+			VALUES ($1, $2, $3::text::relation_kind, 'confirmed')
+			ON CONFLICT (source_id, target_id, kind) DO UPDATE SET state = 'confirmed'`, id, r.ID, r.Kind); err != nil {
+			return fmt.Errorf("no se pudo crear la relación con #%d: %w", r.ID, err)
+		}
+		related = append(related, r.ID)
+	}
 	if sessionID != "" {
 		if err := s.sessions.AddTopics(ctx, sp, sessionID, topicIDs); err != nil {
 			return err
@@ -349,31 +383,12 @@ func (s *Service) insertItem(ctx context.Context, tx pgx.Tx, p *prepared, sessio
 		Topics:     p.topics,
 		Pending:    p.vec == nil,
 		Superseded: superseded,
+
+		Related:          related,
+		MissingRelations: missing,
+		Vector:           p.vec,
 	}
 	return nil
-}
-
-// suggestSimilar looks for active records similar to the record id (whose
-// embedding is vec), leaving out excludeIDs, and stores a suggested "related"
-// relation from id to each. It returns the similar records found. It is shared
-// by Remember and FillPending. Errors are ignored on purpose: the record is
-// already saved and this only adds hints.
-func (s *Service) suggestSimilar(ctx context.Context, id int64, vec []float32, excludeIDs []int64) []Neighbor {
-	near, err := Nearest(ctx, s.pool, vec, s.emb.Dims(), neighborCandidates, maxNeighbors, s.dupThreshold, excludeIDs)
-	if err != nil {
-		return nil
-	}
-	var similar []Neighbor
-	for _, n := range near {
-		_, err := s.pool.Exec(ctx, `INSERT INTO memory_relations (source_id, target_id, kind, state)
-			VALUES ($1, $2, 'related', 'suggested')
-			ON CONFLICT DO NOTHING`, id, n.ID)
-		if err != nil {
-			continue
-		}
-		similar = append(similar, n)
-	}
-	return similar
 }
 
 // insertMemoryTopics links a record to topics in memory_topics.

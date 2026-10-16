@@ -30,9 +30,9 @@ import (
 
 const (
 	// maxItems is the maximum number of items per Remember call.
-	maxItems = 20
+	maxItems = MaxBatch
 	// maxGetIDs is the maximum number of ids per Get call.
-	maxGetIDs = 20
+	maxGetIDs = MaxBatch
 	// maxTitleLen and maxContentLen are measured in runes, after trimming.
 	maxTitleLen   = 200
 	maxContentLen = 8000
@@ -40,9 +40,18 @@ const (
 	defaultTopic = "general"
 	// fillBatchSize is the number of pending records embedded per transaction.
 	fillBatchSize = 32
-	// neighborCandidates and maxNeighbors bound the similar-record search done by Remember.
-	neighborCandidates = 50
-	maxNeighbors       = 3
+)
+
+// MaxBatch is the safety cap shared by every batched operation of lodan
+// (items, ids, queries and operations per call). It is not a usage limit: it
+// only stops a runaway caller from sending an unbounded request.
+const MaxBatch = 200
+
+// Relation kinds an item can declare with Item.Relate.
+const (
+	RelationRelated     = "related"
+	RelationContradicts = "contradicts"
+	RelationPartOf      = "part_of"
 )
 
 // Kind is the type of a memory record.
@@ -86,6 +95,16 @@ type Item struct {
 	Key string
 	// OccurredAt is when the fact happened; nil means now.
 	OccurredAt *time.Time
+	// Relate lists existing records the new one is linked to, with a confirmed
+	// relation from the new record to each.
+	Relate []RelateTo
+}
+
+// RelateTo is a relation requested when saving an item.
+type RelateTo struct {
+	ID int64
+	// Kind is RelationRelated (the default when empty), RelationContradicts or RelationPartOf.
+	Kind string
 }
 
 // Neighbor is an active record semantically similar to another one.
@@ -108,8 +127,13 @@ type Saved struct {
 	Pending bool
 	// Superseded lists the records replaced because they had the same key.
 	Superseded []int64
-	// Similar lists active records similar enough to be duplicates or contradictions.
-	Similar []Neighbor
+	// Related lists the records the item was linked to through Item.Relate.
+	Related []int64
+	// MissingRelations lists the Item.Relate targets that do not exist; the item
+	// is saved anyway.
+	MissingRelations []int64
+	// Vector is the embedding of the record (nil when Pending or Duplicate).
+	Vector []float32
 }
 
 // Relation links a record with another one.

@@ -17,6 +17,18 @@ func TestInstructionsLength(t *testing.T) {
 	}
 }
 
+// S6: the instructions tell the AI to batch and to read the `revisa` candidates.
+func TestInstructionsMentionBatchesAndReview(t *testing.T) {
+	for _, sub := range []string{"lote", "revisa"} {
+		if !strings.Contains(Instructions, sub) {
+			t.Errorf("Instructions does not mention %q", sub)
+		}
+	}
+	if n := utf8.RuneCountInString(Instructions); n > 1500 {
+		t.Errorf("Instructions has %d characters, the maximum is 1500", n)
+	}
+}
+
 func TestTrackerPrune(t *testing.T) {
 	m := newTrackerMap(session.NewManager(nil, time.Minute))
 	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
@@ -81,11 +93,10 @@ func TestFormatSaved(t *testing.T) {
 			}},
 			Pending:    true,
 			Superseded: []int64{45},
-			Similar:    []memory.Neighbor{{ID: 12, Title: "otro", Similarity: 0.93}},
 		},
 		{ID: 45, Title: "Igual", Duplicate: true},
 	})
-	want := "#123 guardado · temas: entrenamiento (gym→entrenamiento) · embedding y parecidos pendientes (se calculan en segundo plano) · sustituye #45 · parecidos: #12 «otro» (0.93)\n" +
+	want := "#123 guardado · temas: entrenamiento (gym→entrenamiento) · embedding y parecidos pendientes (se calculan en segundo plano) · sustituye #45\n" +
 		"#45 ya existía (duplicado): «Igual»"
 	if got != want {
 		t.Errorf("formatSaved =\n%s\nquería\n%s", got, want)
