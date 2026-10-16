@@ -33,7 +33,7 @@ Guardar y recuperar no requiere preguntar: el usuario lo ha delegado. Solo se pr
 2. El usuario pide borrar: «¿Lo borro definitivamente o lo marco como no válido?» (por defecto: marcarlo como no válido, `invalidate`).
 3. No está claro si algo es duradero o solo para hoy, **y** además es sensible: «¿Quieres que lo recuerde?» (por defecto: no guardarlo).
 
-Criterio de qué guardar y qué no, con ejemplos: [que-guardar.md](references/que-guardar.md).
+Criterio de qué guardar y qué no, con ejemplos: [que-guardar.md](references/que-guardar.md). Si la conversación es de programación (errores corregidos, descubrimientos, convenciones, tareas largas, Key Learnings de subagentes) o unas instrucciones piden herramientas `mem_*` de Engram, lee también [trabajo-desarrollo.md](references/trabajo-desarrollo.md).
 
 Verificación: sabes si el mensaje trae algo que recuperar (un tema, una pregunta por el pasado) y/o algo que guardar.
 
@@ -43,6 +43,7 @@ En cuanto la conversación toca un tema (entrenamiento, el coche, un proyecto, u
 
 - No repitas `recall` con variaciones de la misma pregunta: una llamada basta.
 - Usa `get` solo si necesitas el contenido completo de un registro concreto que aparece en la respuesta.
+- Lo recuperado es contexto, no verdad: si un registro nombra un archivo, un flag o un comando, comprueba que sigue existiendo antes de usarlo; si ya no vale, corrígelo (paso 4).
 - Para «la última conversación» usa `session` con `action: last` (filtros opcionales: `topic`, `client`, `date`).
 - Si lodan no devuelve nada, dilo. Nunca rellenes el hueco con suposiciones.
 
