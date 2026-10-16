@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Valida registros para la herramienta `remember` de lodan antes de enviarlos.
 
-Comprueba los mismos límites que aplica el servidor (lodan v1) y avisa de
-problemas de estilo que suelen empeorar la recuperación.
+Comprueba los mismos límites que aplica el servidor (lodan v2) y avisa de
+problemas de estilo que suelen empeorar la recuperación, como las fechas
+relativas («ayer», «hoy»), que deben guardarse como AAAA-MM-DD.
 
 Uso:
   validar_registro.py --json '<lista de items o {"items": [...]}>'
@@ -18,13 +19,20 @@ import sys
 from datetime import datetime
 
 KINDS = {"fact", "preference", "decision", "event", "note"}
+RELACIONES = ("related", "contradicts", "part_of")
+MAX_ITEMS = 200
+_DIAS = "lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo"
+FECHA_RELATIVA = re.compile(
+    r"(?i)(?<!\w)(pasado mañana|anteayer|ayer|hoy|mañana|la semana pasada|el mes pasado|"
+    r"(?:este|el) (?:" + _DIAS + r"))(?!\w)"
+)
 SECRETO = re.compile(r"(?i)(contraseña|password|api[_ -]?key|token|secret|\bdni\b|\biban\b|\bES\d{22}\b)")
 
 
 def validar(items):
     errores, avisos = [], []
-    if not isinstance(items, list) or not 1 <= len(items) <= 20:
-        return ["items debe ser una lista de 1 a 20 registros"], avisos
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
+        return [f"items debe ser una lista de 1 a {MAX_ITEMS} registros"], avisos
     for i, it in enumerate(items, 1):
         p = f"registro {i}"
         if not isinstance(it, dict):
@@ -57,9 +65,38 @@ def validar(items):
                 datetime.fromisoformat(str(occ).replace("Z", "+00:00"))
             except ValueError:
                 errores.append(f"{p}: occurred_at debe ser AAAA-MM-DD o RFC3339")
+        errores.extend(validar_relate(p, it.get("relate")))
+        vistas = set()
+        for m in FECHA_RELATIVA.finditer(content):
+            palabra = m.group(1).lower()
+            if palabra not in vistas:
+                vistas.add(palabra)
+                avisos.append(f"{p}: fecha relativa («{palabra}»); conviértela a AAAA-MM-DD")
         if SECRETO.search(title + " " + content):
             avisos.append(f"{p}: parece contener un secreto; no se deben guardar secretos")
     return errores, avisos
+
+
+def validar_relate(p, relate):
+    """Errores de la lista relate de un registro (None si no la lleva)."""
+    if relate is None:
+        return []
+    forma = f"{p}: relate debe ser una lista de {{id, relation}} con id entero positivo"
+    if not isinstance(relate, list):
+        return [forma]
+    errores = []
+    for r in relate:
+        rid = r.get("id") if isinstance(r, dict) else None
+        if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+            if forma not in errores:
+                errores.append(forma)
+            continue
+        rel = r.get("relation")
+        if rel is not None and rel not in RELACIONES:
+            msg = f"{p}: relation debe ser related, contradicts o part_of"
+            if msg not in errores:
+                errores.append(msg)
+    return errores
 
 
 def main():

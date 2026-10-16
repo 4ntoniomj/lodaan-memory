@@ -3,100 +3,126 @@ name: lodan-memoria
 description: >-
   Usa la memoria persistente lodan (servidor MCP con las herramientas remember, recall,
   get, revise, session y status) para guardar sin preguntar lo que tiene sustancia de
-  cada conversación (decisiones, datos estables, preferencias, eventos, notas) y para
-  recuperar el contexto de un tema en una sola llamada, gastando pocos tokens. Activar
-  cuando el usuario comparta un dato, una decisión o una
-  preferencia ("entreno por la tarde", "hemos decidido usar Postgres"), cuando pregunte
-  por algo pasado ("¿qué hice en el último entreno?", "recuérdame qué decidimos",
-  "¿de qué hablamos la última vez?") o cuando salga un tema del que pueda haber
-  contexto guardado. No usar para desarrollar, depurar o instalar el propio lodan
-  (usar sdd) ni para guardar charla, órdenes de rol o datos temporales.
+  cada conversación (decisiones, datos estables, preferencias, eventos, notas), detectar
+  contradicciones y relaciones con lo ya guardado, y recuperar el contexto de uno o
+  varios temas en una sola llamada, gastando pocos tokens. Activar cuando el usuario
+  comparta un dato, una decisión o una preferencia ("entreno por la tarde", "ayer
+  desayuné churros", "hemos decidido usar Postgres"), cuando pregunte por algo pasado
+  ("¿cuál es la matrícula?", "¿qué hice en el último entreno?", "¿de qué hablamos la
+  última vez?") o cuando salga un tema del que pueda haber contexto guardado. No usar
+  para desarrollar, depurar o instalar el propio lodan (usar sdd) ni para guardar
+  charla, órdenes de rol o datos temporales.
 metadata:
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # lodan-memoria
 
 ## Contexto y objetivo
 
-lodan es la memoria del usuario, única y compartida por todas sus IAs, que funciona solo en su máquina. Sin disciplina falla de dos formas: se llena de ruido (charla, órdenes de rol, cosas temporales) o se queda vacía (las decisiones se pierden porque nadie las guarda). Esta skill fija el ciclo: **recuperar antes de responder, guardar en el momento en que algo se decide, cerrar la sesión con un resumen.** El servidor hace el trabajo pesado (embeddings, duplicados, temas equivalentes, búsqueda); la IA solo habla en lenguaje natural y nunca escribe SQL ni calcula vectores.
+lodan es la memoria del usuario, única y compartida por todas sus IAs, que funciona solo en su máquina. Sin disciplina falla de cuatro formas: se llena de ruido (charla, órdenes de rol, cosas temporales), se queda vacía (las decisiones se pierden porque nadie las guarda), se llena de **contradicciones** (se guarda «ayer desayuné churros» sin mirar que ya decía «tostadas») o se queda en **datos sueltos** (nadie los relaciona). Esta skill fija el ciclo: **recuperar antes de responder, guardar en el momento en que algo se decide, revisar lo que el servidor devuelve al guardar, cerrar la sesión con un resumen.** El servidor hace el trabajo pesado (embeddings, duplicados, temas equivalentes, búsqueda de candidatas); la IA habla en lenguaje natural, decide lo que exige entender el significado y nunca escribe SQL ni calcula vectores.
 
-Criterio de éxito: lo que tiene sustancia queda en lodan con título, tipo y temas correctos; lo trivial no; el contexto de un tema llega con una llamada a `recall`; el usuario ve una sola línea por cada guardado.
+El usuario habla como le salen las cosas, sin pedir «analiza y relaciona». Relacionar y detectar contradicciones es trabajo de la IA en cada guardado, no algo que haya que pedir.
+
+Criterio de éxito: lo que tiene sustancia queda en lodan con título, tipo, temas y fechas absolutas; lo trivial no; ninguna contradicción queda sin resolver; lo relacionado queda relacionado aunque no se parezca; el contexto llega con una llamada; las respuestas son cortas y completas.
 
 ## Tarea o flujo de trabajo
 
 ### Paso 1. Decidir si hay algo que recuperar o guardar
 
-Guardar y recuperar no requiere preguntar: el usuario lo ha delegado. Solo se pregunta en estos casos, con una pregunta y una respuesta por defecto:
+Guardar, recuperar y relacionar no requiere preguntar: el usuario lo ha delegado. Solo se pregunta en estos casos, **una pregunta cada vez**:
 
-1. El dato nuevo contradice uno guardado: «Tenía guardado X; ¿lo sustituyo por Y?» (por defecto: sí, sustituir con `key` o `revise supersede`).
+1. Lo nuevo contradice algo guardado (paso 4): «Tenía guardado X (fecha); ahora dices Y. ¿Cuál es el bueno?». Sin respuesta por defecto: hasta que conteste, los dos quedan relacionados como `contradicts`.
 2. El usuario pide borrar: «¿Lo borro definitivamente o lo marco como no válido?» (por defecto: marcarlo como no válido, `invalidate`).
 3. No está claro si algo es duradero o solo para hoy, **y** además es sensible: «¿Quieres que lo recuerde?» (por defecto: no guardarlo).
 
 Criterio de qué guardar y qué no, con ejemplos: [que-guardar.md](references/que-guardar.md). Si la conversación es de programación (errores corregidos, descubrimientos, convenciones, tareas largas, Key Learnings de subagentes) o unas instrucciones piden herramientas `mem_*` de Engram, lee también [trabajo-desarrollo.md](references/trabajo-desarrollo.md).
 
-Verificación: sabes si el mensaje trae algo que recuperar (un tema, una pregunta por el pasado) y/o algo que guardar.
+Verificación: sabes si el mensaje trae algo que recuperar y/o algo que guardar.
 
-### Paso 2. Recuperar antes de responder
+### Paso 2. Recuperar antes de responder, en lote
 
-En cuanto la conversación toca un tema (entrenamiento, el coche, un proyecto, un recuerdo…), llama **una vez** a `recall` con la pregunta en lenguaje natural, antes de contestar. Devuelve la ficha del tema (datos estables y últimos eventos) y los resultados.
+En cuanto la conversación toca uno o varios temas, llama **una vez** a `recall` antes de contestar. Si hay varias preguntas o temas, van todas en la misma llamada con `queries` (una lista); el servidor las responde a la vez, en un bloque `## <pregunta>` por cada una.
 
-- No repitas `recall` con variaciones de la misma pregunta: una llamada basta.
-- Usa `get` solo si necesitas el contenido completo de un registro concreto que aparece en la respuesta.
+- No repitas `recall` reformulando la misma pregunta; si te falta un tema, añádelo a `queries` en la siguiente llamada.
+- `get` solo si necesitas el contenido completo de registros concretos; todos los ids en una sola llamada.
 - Lo recuperado es contexto, no verdad: si un registro nombra un archivo, un flag o un comando, comprueba que sigue existiendo antes de usarlo; si ya no vale, corrígelo (paso 4).
 - Para «la última conversación» usa `session` con `action: last` (filtros opcionales: `topic`, `client`, `date`).
 - Si lodan no devuelve nada, dilo. Nunca rellenes el hueco con suposiciones.
 
-Verificación: una sola llamada a `recall` (o a `session last`) por tema, y la respuesta al usuario se basa en lo que ha devuelto.
+Verificación: una sola llamada a `recall` (o a `session last`) por turno, y la respuesta se basa en lo devuelto.
 
 ### Paso 3. Guardar en el momento en que algo se decide
 
-En cuanto se asiente una decisión, una preferencia, un dato estable o un evento, llama a `remember` sin preguntar y sin esperar al final de la conversación. Cada registro:
+En cuanto se asiente una decisión, una preferencia, un dato estable o un evento, llama a `remember` sin preguntar. Todos los registros que salen a la vez van en **una sola llamada**. Cada registro:
 
-- `title`: corto y buscable («Horario de entreno», «lodan usa pgvector»).
-- `content`: autosuficiente, que se entienda sin la conversación; incluye el **porqué** si lo hay.
+- `title`: corto y buscable («Horario de entreno», «Desayuno»).
+- `content`: autosuficiente, con el **porqué** si lo hay y con **fechas absolutas**: convierte «hoy», «ayer», «el martes», «la semana pasada» en `AAAA-MM-DD` usando la fecha actual. «Ayer desayuné churros», dicho el 2026-10-16, se guarda como «El 2026-10-15 desayuné churros».
 - `kind`: `decision`, `preference`, `fact`, `event` o `note`.
-- `topics`: de 1 a 3 temas libres y cortos; reutiliza los existentes (el servidor fusiona los equivalentes).
+- `topics`: de 1 a 3 temas cortos; reutiliza los existentes (el servidor fusiona los equivalentes).
 - `key`: para datos que cambian con el tiempo (`entrenamiento/horario`); el nuevo sustituye al anterior.
-- `occurred_at`: fecha real de un evento, si no es hoy.
+- `occurred_at`: la fecha real del hecho (la misma de `content`) cuando no es hoy.
+- `relate`: si ya sabes que se relaciona con registros existentes (por ejemplo, los acabas de ver en `recall`), lista `{id, relation}` con `related`, `part_of` o `contradicts` y se crea en la misma llamada.
 
-Agrupa en una sola llamada los registros que salen a la vez. Plantilla: [templates/registro.md](templates/registro.md). Comprobación previa opcional: `python3 scripts/validar_registro.py --json '<items>'`.
+Plantilla: [templates/registro.md](templates/registro.md). Comprobación previa opcional: `python3 scripts/validar_registro.py --json '<items>'`.
 
-Tras guardar, dile al usuario **una sola línea**: «Guardado en lodan: horario de entreno (preferencia).» Si la respuesta de `remember` avisa de parecidos o de un duplicado, decide: sustituir (`revise supersede`), relacionar (`revise relate`) o dejarlo.
+Verificación: cada ítem devuelve `#id guardado` (o duplicado explicado).
 
-Verificación: cada `remember` devuelve `#id guardado` (o duplicado explicado) y el usuario ha visto su línea.
+### Paso 4. Revisar lo que devuelve el guardado: contradicciones y relaciones
 
-### Paso 4. Corregir lo que deja de valer
+Tras cada ítem guardado, el servidor lista hasta 6 registros con `  revisa: #id [tipo fecha] título — fragmento`. Salen de los mismos temas (aunque no se parezcan en nada), de palabras compartidas y del significado. **Revísalos todos, siempre**, y decide uno por uno:
 
-- Cambió: guarda el nuevo con la misma `key`, o usa `revise` con `action: supersede`.
+| Si el candidato… | Es | Haz |
+| :--- | :--- | :--- |
+| habla de lo mismo, en el mismo momento o con la misma vigencia, con un valor incompatible («tostadas el 2026-10-15» frente a «churros el 2026-10-15»; «la matrícula es 1234 ABC» frente a «la matrícula es 5678 DEF») | contradicción | Relaciónalos como `contradicts` y pregunta al usuario (paso 1, caso 1). Con su respuesta: `revise supersede` (`id` = el falso, `with_id` = el bueno) o `invalidate` del falso. |
+| es la versión anterior de un dato que cambia («entreno por la tarde» → «ahora entreno por la mañana») y la intención del usuario es clara | sustitución | `revise supersede`, sin preguntar. La próxima vez usa `key`. |
+| trata del mismo objeto, persona, proyecto o asunto aunque diga otra cosa (la matrícula y el seguro del mismo coche; el horario y el gimnasio; una tarea y su proyecto) | relación | `revise relate` con `related`, o `part_of` si uno forma parte del otro. |
+| ocurre en otro momento (desayuno del lunes y del martes) o no tiene que ver | nada | Ignóralo. |
+
+- Varias decisiones van juntas en **un solo** `revise` con `ops` (lista de operaciones).
+- No hace falta que se parezcan para relacionarlos: lo decide el significado, no la similitud.
+- Ante la duda entre contradicción y cambio, pregunta.
+
+Verificación: cada `revisa:` tiene una decisión, y las operaciones de `revise` confirman cada cambio.
+
+### Paso 5. Corregir lo que deja de valer
+
+- Cambió: guarda el nuevo con la misma `key`, o `revise` con `action: supersede`.
 - Ya no es cierto: `revise` con `action: invalidate`.
 - Borrado físico: solo si el usuario lo pide expresamente; `revise` con `action: delete` y `confirm: true`.
 
 Verificación: la línea devuelta por `revise` confirma el cambio.
 
-### Paso 5. Cerrar la sesión
+### Paso 6. Cerrar la sesión
 
-Cuando la conversación termina y se guardó algo en ella, llama a `session` con `action: end` y un resumen de 1 a 3 frases: objetivo, qué se decidió y qué queda pendiente. Tras una compactación del contexto, vuelve a llamar a `recall` sobre el tema en curso antes de seguir.
+Cuando la conversación termina y se guardó algo en ella, llama a `session` con `action: end` y un resumen de 1 a 3 frases: objetivo, qué se decidió y qué queda pendiente. Tras una compactación del contexto, vuelve a llamar a `recall` sobre los temas en curso antes de seguir.
 
 Verificación: `session end` devuelve «Sesión cerrada con resumen».
 
 ## Formato de salida
 
-1. La respuesta al usuario, basada en lo recuperado. La memoria es gestión interna, nunca la respuesta en sí.
-2. Una línea por cada guardado o corrección: «Guardado en lodan: …» / «Actualizado en lodan: …».
-3. Si lodan no está disponible (`status` falla o las herramientas no responden): una línea que lo diga, sin sustituirlo en silencio por otro almacén.
+1. **La respuesta al usuario, corta y completa:** una línea con el dato pedido y, como mucho, dos líneas más con lo más útil relacionado que haya en lodan (vigencia, fecha, datos vinculados). Sin párrafos, sin explicar la memoria, sin repetir la pregunta. Ejemplo para «¿cuál es la matrícula?»:
+
+   > 1234 ABC (Seat León de 2016).
+   > Seguro hasta el 2027-03-15; ITV pasada el 2026-06-02.
+
+   Solo se extiende si el usuario pide detalle o un listado.
+2. Una línea por cada guardado o corrección: «Guardado en lodan: …» / «Actualizado en lodan: …» / «Relacionado en lodan: …».
+3. Si hay una contradicción, la pregunta del paso 1, sola, al final.
+4. Si lodan no está disponible (`status` falla o las herramientas no responden): una línea que lo diga, sin sustituirlo en silencio por otro almacén.
 
 ## Restricciones y reglas
 
 - No inventes herramientas ni parámetros: solo las 6 de lodan, descritas en [herramientas.md](references/herramientas.md). Si una llamada falla por parámetros, lee el error y corrígelos.
+- Lotes siempre que haya más de una cosa: `queries` en `recall`, varios `items` en `remember`, `ids` en `get`, `ops` en `revise` y `session`. El tope de 200 por llamada es de seguridad, no de uso.
 - No guardes charla, órdenes de rol («eres el agente orquestador»), instrucciones de la sesión, datos temporales ni lo ya guardado.
 - No guardes secretos: contraseñas, claves de API, números de documentos de identidad o de cuentas bancarias.
+- Nunca guardes fechas relativas («ayer», «hoy», «el martes»): conviértelas.
 - No escribas SQL ni calcules embeddings; habla en lenguaje natural.
-- No hagas varias llamadas a `recall` para la misma pregunta ni pidas `get` de todo por sistema: cada llamada cuesta tokens.
 - Borrar definitivamente exige petición expresa del usuario.
 - Origen y licencias de las ideas adaptadas: [procedencia.md](references/procedencia.md).
 - Mejoras pendientes de esta skill: [backlog.md](references/backlog.md).
 
 ## Ejemplos
 
-Conversación completa con recuperación, guardado, corrección y cierre, y un caso que no debe activarla: [EXAMPLE.md](EXAMPLE.md).
+Conversaciones completas con recuperación en lote, guardado, contradicción, relación y respuesta corta, y un caso que no debe activarla: [EXAMPLE.md](EXAMPLE.md).

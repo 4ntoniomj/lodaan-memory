@@ -303,14 +303,14 @@ También ver [`CODEBASE.md`](CODEBASE.md) para el stack con sus versiones y el e
 
 lodan expone **máximo 6 herramientas** vía MCP (stdio o HTTP streamable):
 
-1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota). Deduplica, resuelve los temas y avisa de parecidos.
-2. **`recall`** — Recupera lo relevante para una pregunta en lenguaje natural: ficha del tema, últimos eventos y resultados.
+1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota). Deduplica, resuelve los temas, crea las relaciones pedidas con `relate` y, debajo de cada registro, lista con `revisa:` hasta 6 registros que la IA debe comprobar por si lo contradicen o se relacionan: los de los mismos temas (aunque no se parezcan), los que comparten alguna palabra y los cercanos en significado. El servidor no crea relaciones solo por parecido.
+2. **`recall`** — Recupera lo relevante para una o varias preguntas (`queries`) en lenguaje natural: ficha del tema, últimos eventos y resultados, en un bloque por pregunta.
 3. **`get`** — Devuelve el contenido completo y las relaciones de registros concretos por id.
-4. **`revise`** — Cambia un registro: `update`, `supersede`, `invalidate`, `delete` (definitivo, con `confirm`) o gestiona relaciones (`relate`, `confirm_relation`, `reject_relation`).
-5. **`session`** — Consulta o cierra conversaciones: `last` (la última; filtrable por tema, cliente o fecha), `list` y `end` (cierra la actual con un resumen).
+4. **`revise`** — Cambia uno o varios registros (`ops`): `update`, `supersede`, `invalidate`, `delete` (definitivo, con `confirm`) o gestiona relaciones (`relate`, `confirm_relation`, `reject_relation`).
+5. **`session`** — Consulta o cierra conversaciones, una o varias operaciones (`ops`): `last` (la última; filtrable por tema, cliente o fecha), `list` y `end` (cierra la actual con un resumen).
 6. **`status`** — Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones y Ollama.
 
-Cada respuesta es texto compacto (sin JSON verboso), con tope de tamaño, y optimizada para tokens. Los parámetros de cada herramienta están en [`skills/lodan-memoria/references/herramientas.md`](skills/lodan-memoria/references/herramientas.md).
+Todas las herramientas que reciben operaciones aceptan lotes, con un mismo tope de seguridad de 200 por llamada; un lote de `recall` calcula los embeddings de golpe y resuelve las búsquedas en paralelo. `recall`, `get` y `status` se declaran de solo lectura (`readOnlyHint`) para que los clientes puedan lanzarlas a la vez. Cada respuesta es texto compacto (sin JSON verboso), con tope de tamaño, y optimizada para tokens. Los parámetros de cada herramienta están en [`skills/lodan-memoria/references/herramientas.md`](skills/lodan-memoria/references/herramientas.md).
 
 ### Búsqueda
 

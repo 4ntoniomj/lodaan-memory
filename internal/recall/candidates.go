@@ -75,13 +75,7 @@ func (s *Service) Candidates(ctx context.Context, req CandidateRequest) ([]Item,
 	}
 
 	if q := orQuery(req.Text); q != "" {
-		rows, err := s.pool.Query(ctx, `SELECT id FROM (
-				SELECT id, tsv FROM memories
-				WHERE tsv @@ websearch_to_tsquery('spanish', $1::text) AND status = 'active' AND NOT (id = ANY($2))
-				LIMIT `+fmt.Sprint(TextRankCap)+`
-			) m
-			ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC
-			LIMIT $3`, q, excludeList, candidateTextLimit)
+		rows, err := s.pool.Query(ctx, CandidateTextSQL, q, excludeList, candidateTextLimit)
 		if err != nil {
 			return nil, fmt.Errorf("falló la búsqueda de texto de candidatos: %w", err)
 		}
@@ -124,15 +118,26 @@ func (s *Service) Candidates(ctx context.Context, req CandidateRequest) ([]Item,
 
 // sameTopic returns the active records of the topics, most recent first.
 func (s *Service) sameTopic(ctx context.Context, topicIDs []int32, exclude []int64) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, `SELECT m.id FROM memories m
-		WHERE m.status = 'active' AND NOT (m.id = ANY($2))
-			AND EXISTS (SELECT 1 FROM memory_topics mt WHERE mt.memory_id = m.id AND mt.topic_id = ANY($1))
-		ORDER BY m.occurred_at DESC, m.id DESC
-		LIMIT $3`, topicIDs, exclude, sameTopicLimit)
+	rows, err := s.pool.Query(ctx, SameTopicSQL, topicIDs, exclude, sameTopicLimit)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudieron leer los registros del tema: %w", err)
 	}
 	return scanIDs(rows)
+}
+
+// isShortNumber reports whether w is a number of at most four digits, such as
+// the parts of a date ("2026", "10", "15"). Records store absolute dates, so
+// those numbers are shared by unrelated records and are not a useful link.
+func isShortNumber(w string) bool {
+	if len(w) > 4 {
+		return false
+	}
+	for _, r := range w {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // orQuery turns text into a websearch query that matches any of its words
@@ -144,7 +149,7 @@ func orQuery(text string) string {
 	seen := make(map[string]bool, len(words))
 	var terms []string
 	for _, w := range words {
-		if w == "or" || seen[w] {
+		if w == "or" || seen[w] || isShortNumber(w) {
 			continue
 		}
 		seen[w] = true

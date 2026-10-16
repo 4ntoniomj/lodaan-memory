@@ -1,81 +1,136 @@
 # Ejemplo: lodan-memoria
 
-Salidas reales del servidor lodan v1 (prueba de humo del 2026-09-29), recortadas con `…` donde son largas.
+Salidas reales del servidor lodan v2 (prueba de extremo a extremo del 2026-10-16, con un embedder de pruebas; con el modelo real cambian los parecidos, no el formato). La fecha actual en el ejemplo es el 2026-10-16.
 
-## Caso 1. Dato personal, recuperación en otra sesión, corrección y cierre
+## Caso 1. Datos sueltos, contradicción, relación y respuesta corta
 
-### Entrada (sesión A)
+### Entrada (día 15)
 
-> Entreno por la tarde, de lunes a viernes, rutina de fuerza. Hoy he hecho pierna: sentadilla 5x5 con 100 kg.
+> Hoy he desayunado tostadas. Por cierto, la matrícula del León es 1234 ABC y pasó la ITV el 2 de junio.
 
 ### Ejecución intermedia
 
-1. Paso 1: hay dos datos con sustancia (una preferencia estable y un evento). No hay contradicción ni nada sensible: no se pregunta.
-2. Paso 3: una sola llamada con los dos registros.
+Paso 1: tres datos con sustancia, sin contradicción visible. Paso 3: **una** llamada, con las fechas convertidas («hoy» es 2026-10-15 ese día).
 
 ```json
 remember {"items": [
-  {"title": "Horario de entreno", "content": "Entreno por la tarde, de lunes a viernes, rutina de fuerza.", "kind": "preference", "topics": ["entrenamiento"], "key": "entrenamiento/horario"},
-  {"title": "Entreno de pierna", "content": "Sentadilla 5x5 con 100 kg.", "kind": "event", "topics": ["gimnasio"]}
+  {"title": "Matrícula del coche", "content": "La matrícula del Seat León de 2016 es 1234 ABC.", "kind": "fact", "topics": ["coche"]},
+  {"title": "ITV del coche", "content": "El 2026-06-02 el coche pasó la ITV sin defectos.", "kind": "event", "topics": ["coche"], "occurred_at": "2026-06-02"},
+  {"title": "Desayuno", "content": "El 2026-10-15 desayuné tostadas.", "kind": "event", "topics": ["desayuno"], "occurred_at": "2026-10-15"}
 ]}
 ```
 
 ```text
-#1 guardado · temas: entrenamiento
-#2 guardado · temas: entrenamiento (gimnasio→entrenamiento)
+#1 guardado · temas: coche
+#2 guardado · temas: coche
+#3 guardado · temas: desayuno
 ```
 
-### Salida (sesión A)
+> Guardado en lodan: matrícula del coche (dato), ITV del coche y desayuno (eventos).
 
-> …respuesta a lo que el usuario pidiera…
-> Guardado en lodan: horario de entreno (preferencia) y entreno de pierna (evento).
+### Entrada (día 16, otra conversación u otra IA)
 
-### Entrada (sesión B, otro día u otra IA)
-
-> ¿Qué hice en el último entreno?
+> Ayer desayuné churros. El seguro del coche vence el 15 de marzo del año que viene.
 
 ### Ejecución intermedia
 
-Paso 2: una sola llamada a `recall`, antes de responder.
+Paso 3: «ayer» es 2026-10-15; «el año que viene» es 2027. Una sola llamada.
+
+```json
+remember {"items": [
+  {"title": "Desayuno", "content": "El 2026-10-15 desayuné churros.", "kind": "event", "topics": ["desayuno"], "occurred_at": "2026-10-15"},
+  {"title": "Seguro del coche", "content": "El seguro del coche vence el 2027-03-15.", "kind": "fact", "topics": ["coche"]}
+]}
+```
 
 ```text
-recall {"query": "¿qué hice en el último entreno?"}
+#4 guardado · temas: desayuno
+  revisa: #3 [evento 2026-10-15] Desayuno — El 2026-10-15 desayuné tostadas.
+#5 guardado · temas: coche
+  revisa: #2 [evento 2026-06-02] ITV del coche — El 2026-06-02 el coche pasó la ITV sin defectos.
+  revisa: #1 [dato 2026-10-16] Matrícula del coche — La matrícula del Seat León de 2016 es 1234 ABC.
+```
 
-Tema: entrenamiento (detectado)
+Paso 4, candidata por candidata:
+
+- `#3` frente a `#4`: mismo desayuno, mismo día y valor distinto, así que es una **contradicción**. Se relacionan y se pregunta.
+- `#1` y `#2` frente a `#5`: mismo coche, datos distintos, así que es una **relación**, aunque el seguro no se parezca a la matrícula.
+
+Las tres decisiones van en un solo `revise`:
+
+```json
+revise {"ops": [
+  {"id": 4, "action": "relate", "with_id": 3, "relation": "contradicts"},
+  {"id": 5, "action": "relate", "with_id": 1, "relation": "related"},
+  {"id": 5, "action": "relate", "with_id": 2, "relation": "related"}
+]}
+```
+
+```text
+1. #4 contradicts #3 (confirmada)
+2. #5 related #1 (confirmada)
+3. #5 related #2 (confirmada)
+```
+
+### Salida
+
+> Guardado en lodan: desayuno del 2026-10-15 y seguro del coche. Relacionado en lodan: seguro con matrícula e ITV.
+> Tenía guardado que el 2026-10-15 desayunaste tostadas; ahora dices churros. ¿Cuál es el bueno?
+
+### Entrada
+
+> Churros, lo de las tostadas fue otro día.
+
+Paso 4 con la respuesta: `#3` es el falso y `#4` el bueno.
+
+```text
+revise {"id": 3, "action": "supersede", "with_id": 4}
+
+#3 sustituido por #4
+```
+
+> Actualizado en lodan: desayuno del 2026-10-15 (churros).
+
+## Caso 2. Varias preguntas en una llamada y respuesta corta
+
+### Entrada
+
+> ¿Cuál es la matrícula del coche? ¿Y qué desayuné el 15?
+
+### Ejecución intermedia
+
+Paso 2: las dos preguntas en **un** `recall` con `queries`.
+
+```text
+recall {"queries": ["¿cuál es la matrícula del coche?", "¿qué desayuné el 15 de octubre?"]}
+
+## ¿cuál es la matrícula del coche?
+Tema: coche (detectado)
 Datos estables:
-#1 [preferencia 2026-09-29] Horario de entreno — Entreno por la tarde, de lunes a viernes, rutina de fuerza.
+#5 [dato 2026-10-16] Seguro del coche — El seguro del coche vence el 2027-03-15.
+#1 [dato 2026-10-16] Matrícula del coche — La matrícula del Seat León de 2016 es 1234 ABC.
 Últimos eventos:
-#2 [evento 2026-09-28] Entreno de pierna — Sentadilla 5x5 con 100 kg.
+#2 [evento 2026-06-02] ITV del coche — El 2026-06-02 el coche pasó la ITV sin defectos.
+Resultados:
+#4 [evento 2026-10-15] Desayuno — El 2026-10-15 desayuné churros.
+
+## ¿qué desayuné el 15 de octubre?
+Resultados:
+#4 [evento 2026-10-15] Desayuno — El 2026-10-15 desayuné churros.
+#5 [dato 2026-10-16] Seguro del coche — El seguro del coche vence el 2027-03-15.
+#2 [evento 2026-06-02] ITV del coche — El 2026-06-02 el coche pasó la ITV sin defectos.
+#1 [dato 2026-10-16] Matrícula del coche — La matrícula del Seat León de 2016 es 1234 ABC.
 Usa get con los ids para ver el detalle.
 ```
 
-### Salida (sesión B)
+### Salida
 
-> Tu último entreno fue de pierna: sentadilla 5x5 con 100 kg. Sueles entrenar por la tarde, de lunes a viernes.
+Una línea por dato y como mucho dos con lo relacionado; nada de párrafos:
 
-### Entrada (sesión B, más tarde)
+> Matrícula: 1234 ABC (Seat León de 2016). Seguro hasta el 2027-03-15; ITV pasada el 2026-06-02.
+> El 15 desayunaste churros.
 
-> A partir de ahora entreno por la mañana.
-
-Paso 1: contradice el registro #1 y la intención es clara, así que no se pregunta. Paso 3: misma `key`, que sustituye al anterior.
-
-```text
-remember {"items": [{"title": "Horario de entreno", "content": "Entreno por la mañana, de lunes a viernes, rutina de fuerza.", "kind": "preference", "topics": ["entrenamiento"], "key": "entrenamiento/horario"}]}
-
-#3 guardado · temas: entrenamiento · sustituye #1
-```
-
-> Actualizado en lodan: horario de entreno (ahora por la mañana).
-
-Paso 5, al terminar:
-
-```text
-session {"action": "end", "summary": "Consulta del último entreno y cambio de horario a la mañana."}
-
-Sesión cerrada con resumen (id 01M3PV2JW6NXMF6CMH8GETQS5B)
-```
-
-## Caso 2. Orden de rol y charla: no se guarda nada
+## Caso 3. Orden de rol y charla: no se guarda nada
 
 ### Entrada
 
@@ -89,7 +144,7 @@ Paso 1: es una orden de rol de la sesión y cortesía. No hay tema que recuperar
 
 > (La IA sigue con el trabajo. No llama a lodan y no muestra ninguna línea de guardado.)
 
-## Caso 3. Petición vecina que no activa esta skill
+## Caso 4. Petición vecina que no activa esta skill
 
 > Añade un índice nuevo a la tabla memories de lodan.
 

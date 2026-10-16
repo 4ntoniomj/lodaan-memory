@@ -34,6 +34,28 @@ func TextCandidatesSQL(includeHistory bool) string {
 	return sql
 }
 
+// CandidateTextSQL is the full-text statement of the review candidates of a new
+// record: active records matching any of its words (the query is built as
+// "a or b or c"), best ranked first. Parameters: $1 the query, $2 the ids to
+// leave out and $3 the number of ids. The ranking is computed over at most
+// TextRankCap matches, as in TextCandidatesSQL.
+var CandidateTextSQL = `SELECT id FROM (
+		SELECT id, tsv FROM memories
+		WHERE tsv @@ websearch_to_tsquery('spanish', $1::text) AND status = 'active' AND NOT (id = ANY($2))
+		LIMIT ` + strconv.Itoa(TextRankCap) + `
+	) m
+	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC
+	LIMIT $3`
+
+// SameTopicSQL is the statement of the active records of some topics, most
+// recent first, used for the review candidates of a new record. Parameters: $1
+// the topic ids, $2 the ids to leave out and $3 the maximum number of rows.
+const SameTopicSQL = `SELECT m.id FROM memories m
+	WHERE m.status = 'active' AND NOT (m.id = ANY($2))
+		AND EXISTS (SELECT 1 FROM memory_topics mt WHERE mt.memory_id = m.id AND mt.topic_id = ANY($1))
+	ORDER BY m.occurred_at DESC, m.id DESC
+	LIMIT $3`
+
 // ProfileSQL is the statement of the stable records (facts, preferences and
 // decisions) of a topic, most recent first. Parameters: $1 the topic id and $2 the
 // maximum number of rows. It returns the columns of scanItems: id, kind, status,
