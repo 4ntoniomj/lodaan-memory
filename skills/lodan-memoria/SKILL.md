@@ -13,7 +13,7 @@ description: >-
   para desarrollar, depurar o instalar el propio lodan (usar sdd) ni para guardar
   charla, órdenes de rol o datos temporales.
 metadata:
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # lodan-memoria
@@ -24,7 +24,7 @@ lodan es la memoria del usuario, única y compartida por todas sus IAs, que func
 
 El usuario habla como le salen las cosas, sin pedir «analiza y relaciona». Relacionar y detectar contradicciones es trabajo de la IA en cada guardado, no algo que haya que pedir.
 
-Criterio de éxito: lo que tiene sustancia queda en lodan con título, tipo, temas y fechas absolutas; lo trivial no; ninguna contradicción queda sin resolver; lo relacionado queda relacionado aunque no se parezca; el contexto llega con una llamada; las respuestas son cortas y completas.
+Criterio de éxito: lo que tiene sustancia queda en lodan con título, tipo, temas y fechas absolutas; lo trivial no; ninguna contradicción queda sin resolver; lo relacionado queda relacionado aunque no se parezca; el contexto llega con una llamada; las respuestas tienen todo lo pertinente y nada de relleno.
 
 ## Tarea o flujo de trabajo
 
@@ -43,6 +43,9 @@ Verificación: sabes si el mensaje trae algo que recuperar y/o algo que guardar.
 ### Paso 2. Recuperar antes de responder, en lote
 
 En cuanto la conversación toca uno o varios temas, llama **una vez** a `recall` antes de contestar. Si hay varias preguntas o temas, van todas en la misma llamada con `queries` (una lista); el servidor las responde a la vez, en un bloque `## <pregunta>` por cada una.
+
+- **Busca por todos los nombres de lo preguntado.** Una misma cosa puede estar guardada con siglas, abreviaturas o alias (por ejemplo «AGM» y «Agridemur», o el nombre comercial y el fiscal de un cliente). Mete en `queries` cada nombre que conozcas por la conversación o por lodan. Si un resultado dice que X también se llama Y y no lo habías buscado, haz un segundo `recall` con Y antes de responder.
+- Cuando el usuario te diga que dos nombres son lo mismo («AGM es Agridemur»), guárdalo como `fact` con título «Alias: X = Y» en el tema de los dos.
 
 - No repitas `recall` reformulando la misma pregunta; si te falta un tema, añádelo a `queries` en la siguiente llamada.
 - `get` solo si necesitas el contenido completo de registros concretos; todos los ids en una sola llamada.
@@ -101,12 +104,18 @@ Verificación: `session end` devuelve «Sesión cerrada con resumen».
 
 ## Formato de salida
 
-1. **La respuesta al usuario, corta y completa:** una línea con el dato pedido y, como mucho, dos líneas más con lo más útil relacionado que haya en lodan (vigencia, fecha, datos vinculados). Sin párrafos, sin explicar la memoria, sin repetir la pregunta. Ejemplo para «¿cuál es la matrícula?»:
+1. **La respuesta al usuario: completa y sin relleno.** El usuario quiere saberlo **todo** lo que lodan tiene sobre lo que pregunta, y nada que no aporte. La longitud la marca la cantidad de datos, nunca un tope de líneas.
+   - Incluye todo lo pertinente que hayas recuperado, también lo que está guardado con otro nombre (siglas, alias) y lo dudoso, marcado como dudoso.
+   - Formato denso: una línea o una fila de tabla por dato; sin párrafos, sin introducciones, sin repetir la pregunta, sin explicar la memoria ni de dónde sale cada dato salvo que haga falta para resolver una duda.
+   - **Nunca te guardes datos encontrados para ofrecerlos después** («¿quieres esa lista?», «dime si quieres más»): si es pertinente, va en la respuesta.
+   - Relleno es lo que no es un dato: cortesías, resúmenes de lo ya dicho, consejos no pedidos.
 
-   > 1234 ABC (Seat León de 2016).
-   > Seguro hasta el 2027-03-15; ITV pasada el 2026-06-02.
+   Ejemplo para «¿cuál es la matrícula del coche?»:
 
-   Solo se extiende si el usuario pide detalle o un listado.
+   > 1234 ABC — Seat León de 2016.
+   > Seguro hasta el 2027-03-15; ITV pasada el 2026-06-02 sin defectos.
+
+   Ejemplo para «¿qué coches tiene Agridemur?»: la tabla completa de los coches de Agridemur **y** los vehículos marcados AGM (AGM = Agridemur) en otras hojas, con sus dudas, en una sola respuesta.
 2. Una línea por cada guardado o corrección: «Guardado en lodan: …» / «Actualizado en lodan: …» / «Relacionado en lodan: …».
 3. Si hay una contradicción, la pregunta del paso 1, sola, al final.
 4. Si lodan no está disponible (`status` falla o las herramientas no responden): una línea que lo diga, sin sustituirlo en silencio por otro almacén.
@@ -125,4 +134,4 @@ Verificación: `session end` devuelve «Sesión cerrada con resumen».
 
 ## Ejemplos
 
-Conversaciones completas con recuperación en lote, guardado, contradicción, relación y respuesta corta, y un caso que no debe activarla: [EXAMPLE.md](EXAMPLE.md).
+Conversaciones completas con recuperación en lote, guardado, contradicción, relación y respuesta completa, y un caso que no debe activarla: [EXAMPLE.md](EXAMPLE.md).

@@ -33,8 +33,8 @@
 ## Respuesta al usuario
 
 ```text
-<el dato, en una línea>
-<como mucho dos líneas con lo más útil relacionado>
+<todo lo pertinente que haya en lodan, una línea o fila por dato, incluido lo guardado con otro nombre>
+<sin párrafos, sin relleno y sin ofrecer «¿quieres…?» datos que ya tienes>
 ```
 
 ## Línea al usuario tras guardar

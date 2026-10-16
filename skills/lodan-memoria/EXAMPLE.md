@@ -2,7 +2,7 @@
 
 Salidas reales del servidor lodan v2 (prueba de extremo a extremo del 2026-10-16, con un embedder de pruebas; con el modelo real cambian los parecidos, no el formato). La fecha actual en el ejemplo es el 2026-10-16.
 
-## Caso 1. Datos sueltos, contradicción, relación y respuesta corta
+## Caso 1. Datos sueltos, contradicción, relación y respuesta completa
 
 ### Entrada (día 15)
 
@@ -91,7 +91,7 @@ revise {"id": 3, "action": "supersede", "with_id": 4}
 
 > Actualizado en lodan: desayuno del 2026-10-15 (churros).
 
-## Caso 2. Varias preguntas en una llamada y respuesta corta
+## Caso 2. Varias preguntas en una llamada y respuesta completa
 
 ### Entrada
 
@@ -125,7 +125,7 @@ Usa get con los ids para ver el detalle.
 
 ### Salida
 
-Una línea por dato y como mucho dos con lo relacionado; nada de párrafos:
+Todo lo que hay sobre lo preguntado, un dato por línea y nada de relleno:
 
 > Matrícula: 1234 ABC (Seat León de 2016). Seguro hasta el 2027-03-15; ITV pasada el 2026-06-02.
 > El 15 desayunaste churros.

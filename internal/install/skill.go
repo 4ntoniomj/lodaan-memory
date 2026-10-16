@@ -30,7 +30,7 @@ const instructionsText = "## Memoria persistente: lodan\n" +
 	"- Guarda con `remember`, sin preguntar, lo que tenga sustancia (decisiones, datos estables, preferencias, eventos, notas), con fechas absolutas; nunca charla ni órdenes de rol. Avisa en una línea de lo guardado.\n" +
 	"- Tras guardar, revisa cada línea `revisa:`: si contradice lo nuevo, pregunta al usuario cuál es el bueno; si está relacionado, relaciónalo con `revise`.\n" +
 	"- En cuanto la conversación toque uno o varios temas, llama a `recall` una vez (varias preguntas en `queries`) antes de responder; trabaja siempre en lote.\n" +
-	"- Responde breve: una línea con el dato y como mucho dos con lo más útil relacionado.\n" +
+	"- Responde con todo lo que lodan tenga sobre lo preguntado (busca también por sus siglas y alias) y sin relleno: un dato por línea, sin párrafos y sin ofrecer aparte datos que ya tienes.\n" +
 	"- Al terminar una conversación con contenido guardado, cierra con `session` (`action: end`) y un resumen breve.\n" +
 	"- Si lodan no está disponible, dilo y no lo sustituyas en silencio por otro almacén."
 
