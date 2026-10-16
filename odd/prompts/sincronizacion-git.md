@@ -11,7 +11,7 @@ Quiero lo que hace Engram con su sincronización por git: que la memoria de una 
 2. Identidad global estable para cada registro, relación, tema y sesión (por ejemplo un ULID o UUID `sync_id`), para que importar sea idempotente: importar dos veces no duplica, y los ids locales nunca viajan como referencia.
 3. Reglas de fusión explícitas: un registro sustituido o invalidado en una máquina lo queda también en la otra; si las dos máquinas cambian lo mismo, gana lo más reciente y la otra versión queda como historial; si dos registros vigentes chocan, se relacionan como `contradicts` y se le pregunta al usuario cuál vale.
 4. No sincronizar los vectores de embeddings (se recalculan en cada máquina) ni secretos de configuración (`secret`, `config.json`).
-5. Privacidad: lodan guarda datos personales. Antes de diseñar, pregúntame si quiero los ficheros del repositorio **cifrados** (en GitHub solo se ve contenido ilegible; la clave vive solo en mis máquinas y, si la pierdo, el contenido del repositorio no se puede recuperar) o **en claro** en un repositorio privado (legible por cualquiera que entre en la cuenta), y qué repositorio usar.
+5. Privacidad: lodan guarda datos personales. Decidido: el repositorio es `lodan-sync` en mi GitHub (`4ntoniomj/lodan-sync`, privado) y los ficheros van **cifrados**; en GitHub solo debe verse contenido ilegible. La clave vive solo en mis máquinas, nunca en el repositorio ni en lodan; explica cómo la guardo y cómo la paso a otra máquina, y avisa de que si se pierde el contenido del repositorio no se puede recuperar. Elige el cifrado con una librería estándar y mantenida, verificada en su documentación.
 6. Instalarlo en este Windows y dejarlo listo para una segunda máquina.
 
 [RESTRICCIONES]
