@@ -33,7 +33,7 @@ User requirements quoted verbatim are in `## Log` (L1-L3). The agreed design:
 | T0 | — | inline | done | sync installed skill into repo |
 | T1 | S1-S5 | examinador writes tests; parent implements inline | done | 4715003; sealed tests GREEN; assess medium, review_due false (under_budget) |
 | T2 | S6-S7 | inline; validator tests by examinador | done | sealed .git/tdd-sello-T2.sha256, 18/18 GREEN; see commit "docs(skill)" |
-| T3 | S9 | inline | pending | |
+| T3 | S9 | inline | done | binary 2026.10.16+3a3d6bd in AppData\Local\lodan\bin (old kept as lodan.old-2026-10-16.exe); service restarted; skill in ~/.claude/skills and ~/.gemini/config/skills; GEMINI.md block updated; verified Claude (2 blocks), opencode (mcp connected tools=6), Antigravity (status + skill, schema with queries) |
 | T4 | S8 | inline (AI judgement) | pending | |
 | T5 | S10 | hooks (to specify) | pending | |
 | T6 | S11 | git sync (to specify) | pending | |
@@ -48,3 +48,4 @@ User requirements quoted verbatim are in `## Log` (L1-L3). The agreed design:
 - L6 (2026-10-16, user): "Si" — the examinador may fix that test's data only.
 - L7 (2026-10-16, user, scope addition): "Puedes implementar lo mejor que tiene engram en lodan: 1. Automatismos que no dependen de la disciplina de la IA. Sus plugins para Claude Code y opencode usan hooks del ciclo de vida: * tras una compactación, inyecta instrucciones de recuperación; * al terminar un subagente, captura lo útil de forma pasiva. 2. Sincronización con git entre máquinas. Si el punto 2 dice que ya lo estás implementando pues no hace falta, solo implementa estos dos que te nombro". Git sync is NOT part of the current work, so both points are new scope (S10 hooks, S11 git sync), to be specified after T1-T4.
 - L8 (2026-10-16, evidence): sealed `test_validar_registro.py` `RelativeDates.test_case_insensitive` lowercases every warning (`got = [a.lower() ...]`) but expects `...conviértela a AAAA-MM-DD` in uppercase, so no implementation can pass it; the other 17 tests pass.
+- L9 (2026-10-16, evidence): pg_dump backup AppData/Local/lodan/backups-manual/lodan_pgdump_2026-10-16_antes_lotes.dump (3.6 MB, 9 tables). Spy check: 40-query recall batch -> 2 EmbedQueries calls, 0 single. Real-DB smoke: 10 single recalls 1.34 s vs one batch of 10 1.23 s server-side (the gain is in AI round trips). `opencode mcp list` prints "No MCP servers configured" on opencode 2.0.30 although its log shows `mcp connected server=lodan tools=6`. Antigravity hooks only offer SessionStart, Pre/PostToolUse, Pre/PostInvocation and Stop (no compaction or subagent events).
