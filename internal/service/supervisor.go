@@ -19,6 +19,7 @@ import (
 	"lodan/internal/config"
 	"lodan/internal/database"
 	"lodan/internal/embedding"
+	"lodan/internal/gitsync"
 	"lodan/internal/mcptools"
 	"lodan/internal/memory"
 	"lodan/internal/session"
@@ -300,6 +301,17 @@ func superviseStack(ctx context.Context, cfg config.Config, cluster *database.Cl
 		defer wg.Done()
 		warmUp(runCtx, emb, logger)
 	}()
+	if c, ok, err := gitsync.FromConfig(cfg); err != nil {
+		logger.Printf("sincronización desactivada: %v", err)
+	} else if ok && cfg.SyncIntervalMinutes > 0 {
+		interval := time.Duration(cfg.SyncIntervalMinutes) * time.Minute
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gitsync.RunPeriodic(runCtx, pool, c, interval, logger)
+		}()
+		logger.Printf("sincronización con %s cada %s", c.RepoURL, interval)
+	}
 
 	logger.Printf("servicio listo: base de datos %q migrada, mantenimiento cada %s", databaseName, maintenanceInterval)
 	return watch(ctx, cluster, pg, logger)

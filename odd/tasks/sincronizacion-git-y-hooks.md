@@ -46,9 +46,9 @@ The user's prompt is quoted verbatim in L1; the approved proposal is in L2. Quot
 
 | ID | Specs | Route | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | S1-S6 | examinador writes tests; parent implements inline | done | sealed .git/tdd-sello-T1.sha256 (21 tests); RED: package missing; GREEN: `go test ./internal/gitsync/` ok 619 s |
-| T2 | S7-S9 | examinador writes tests; parent implements inline | pending | |
-| T3 | S10-S12 | examinador writes tests; parent implements inline | pending | |
+| T1 | S1-S6 | examinador writes tests; parent implements inline | done | 1b4fd33; sealed .git/tdd-sello-T1.sha256 (21 tests); RED: package missing; GREEN: `go test ./internal/gitsync/` ok 619 s; assess medium, review_due false (under_budget) |
+| T2 | S7-S9 | examinador writes tests; parent implements inline | done | sealed .git/tdd-sello-T2.sha256 (16 tests); RED: missing symbols / unknown subcommand; GREEN: gitsync TestInit/Push/Pull ok 98 s, config ok, cmd/lodan ok. S8 supervisor loop has no automated test (only config) |
+| T3 | S10-S12 | examinador writes tests; parent implements inline | done | sealed .git/tdd-sello-T3.sha256 (35 tests incl. PostToolUse SubagentHandback); RED: package missing / undefined stdin; GREEN: hook ok 222 s, cmd/lodan ok |
 | T4 | S13 | examinador writes installer tests; parent implements inline | pending | |
 | T5 | S14 | inline, with the user for the real client checks | pending | |
 

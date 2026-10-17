@@ -35,6 +35,19 @@ func DefaultDataDir() (string, error) {
 	}
 }
 
+// DefaultSyncKeyFile returns the default path of the sync encryption key: the per-user
+// configuration directory, outside the data directory, so lodan backups never carry it.
+func DefaultSyncKeyFile() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("no se pudo determinar el directorio de configuración: %w", err)
+	}
+	return filepath.Join(dir, "lodan", "sync.key"), nil
+}
+
+// SyncDir is the working copy of the sync repository.
+func (c Config) SyncDir() string { return filepath.Join(c.DataDir, "sync-repo") }
+
 // PGDataDir is the directory of the local PostgreSQL cluster.
 func (c Config) PGDataDir() string { return filepath.Join(c.DataDir, "pg") }
 

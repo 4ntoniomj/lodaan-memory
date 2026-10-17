@@ -29,6 +29,10 @@ type Config struct {
 	DupSimilarity         float64 `json:"dup_similarity"`
 	TopicSimilarity       float64 `json:"topic_similarity"`        // two topic names are equivalent
 	TopicDetectSimilarity float64 `json:"topic_detect_similarity"` // a query is detected as belonging to a topic
+	SyncRepo              string  `json:"sync_repo,omitempty"`     // git URL of the sync repository; empty means sync is off
+	SyncMachine           string  `json:"sync_machine,omitempty"`  // this machine's folder in the sync repository
+	SyncKeyFile           string  `json:"sync_key_file,omitempty"` // age key; kept outside DataDir so backups never carry it
+	SyncIntervalMinutes   int     `json:"sync_interval_minutes"`   // periodic sync from the service; 0 = off
 }
 
 // Default returns the configuration with built-in defaults.
@@ -114,6 +118,7 @@ func applyEnv(cfg *Config) error {
 		{"LODAN_EMBED_TIMEOUT_MS", &cfg.EmbedTimeoutMs},
 		{"LODAN_RECALL_MAX_BYTES", &cfg.RecallMaxBytes},
 		{"LODAN_SESSION_IDLE_MINUTES", &cfg.SessionIdleMinutes},
+		{"LODAN_SYNC_INTERVAL_MINUTES", &cfg.SyncIntervalMinutes},
 	}
 	for _, i := range ints {
 		v := os.Getenv(i.name)
@@ -174,6 +179,9 @@ func (c Config) Validate() error {
 	}
 	if c.SessionIdleMinutes < 1 {
 		return fmt.Errorf("session_idle_minutes debe ser al menos 1, y es %d", c.SessionIdleMinutes)
+	}
+	if c.SyncIntervalMinutes < 0 {
+		return fmt.Errorf("sync_interval_minutes no puede ser negativo, y es %d", c.SyncIntervalMinutes)
 	}
 
 	host, port, err := net.SplitHostPort(c.HTTPAddr)

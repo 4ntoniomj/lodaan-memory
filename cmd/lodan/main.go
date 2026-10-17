@@ -28,6 +28,7 @@ Subcomandos:
   uninstall Desinstala lodan (los datos se conservan salvo con --purge)
   service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
   bench     Ejecuta el benchmark (--rows, --out)
+  sync      Sincroniza la memoria con otras máquinas por git, cifrada: init | push | pull
 
 Copias de seguridad (paran PostgreSQL solo mientras se copian los datos; la compresión
 se hace con PostgreSQL ya en marcha y el destino necesita espacio libre para esa copia):
@@ -79,6 +80,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctor(rest, stdout, stderr)
 	case "bench":
 		return runBench(rest, stderr)
+	case "sync":
+		return runSync(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "lodan: subcomando desconocido %q\n\n", name)
 		fmt.Fprint(stderr, usageText)

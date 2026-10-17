@@ -10,6 +10,8 @@ Memoria persistente local para asistentes de IA. Guarda decisiones, preferencias
 - [Uso básico](#uso-básico)
 - [Comandos CLI](#comandos-cli)
 - [Backup y Restauración](#backup-y-restauración)
+- [Sincronización entre máquinas](#sincronización-entre-máquinas)
+- [Hooks de los clientes de IA](#hooks-de-los-clientes-de-ia)
 - [Documentación técnica](#documentación-técnica)
 - [Arquitectura](#arquitectura)
 - [Estado del proyecto](#estado-del-proyecto)
@@ -194,6 +196,7 @@ lodan lee `config.json` de la carpeta de datos; las variables de entorno `LODAN_
 | Dirección HTTP de `serve --http` | `127.0.0.1:7438` | `LODAN_HTTP_ADDR` |
 | Tope de una respuesta de `recall` | 6000 bytes | `LODAN_RECALL_MAX_BYTES` |
 | Minutos de inactividad que cierran una sesión | 30 | `LODAN_SESSION_IDLE_MINUTES` |
+| Minutos entre sincronizaciones automáticas del servicio (`sync_interval_minutes`; 0 = desactivada) | 0 | `LODAN_SYNC_INTERVAL_MINUTES` |
 
 El resto de ajustes (carpeta de binarios de PostgreSQL, umbrales de duplicados y de temas, tiempos del embedding) están en [`internal/config/config.go`](internal/config/config.go).
 
@@ -213,6 +216,8 @@ Todos los subcomandos aceptan `-h` para mostrar sus opciones (`lodan <subcomando
 | `doctor` | Diagnostica la instalación, con una línea por comprobación | `./lodan doctor` |
 | `uninstall` | Desinstala lodan; los datos se conservan salvo con `--purge`. Opciones: `--yes`, `--dry-run`, `--purge` | `./lodan uninstall --purge` |
 | `service` | Gestiona el servicio de sistema: `start`, `stop`, `restart`, `enable`, `disable`, `status` (cada uno con `--name`, por defecto `lodan`) | `./lodan service status` |
+| `sync` | Sincroniza la memoria con otras máquinas por git, cifrada: `init --repo <url> [--key <fichero>] [--machine <id>]`, `push`, `pull` | `./lodan sync pull` |
+| `hook` | Hooks de los clientes de IA: `compact`, `subagent-stop` (con `--client <nombre>`; leen el evento por la entrada estándar y siempre salen con 0) | `./lodan hook compact --client claude-code` |
 | `bench` | Ejecuta el benchmark sobre la base `lodan_bench`. Opciones: `--rows`, `--candidates`, `--reuse`, `--queries`, `--out`, `--seed`, `--embed-queries` | `./lodan bench --rows 10000,100000` |
 
 Notas:
@@ -285,6 +290,75 @@ En Windows el PostgreSQL del servicio corre bajo la cuenta LocalSystem. Un `loda
 ### Retención de backups
 
 La gestión automática de retención (eliminar backups antiguos) se implementará mediante un script bash en futuro. Por ahora, mantén el directorio de backups manualmente.
+
+---
+
+## Sincronización entre máquinas
+
+`lodan sync` lleva la memoria de una máquina a las demás a través de un repositorio git privado, sin perder ni duplicar nada. Cada máquina escribe solo en su carpeta `changes/<máquina>/` del repositorio, así que git nunca tiene que fusionar un fichero.
+
+- **Qué viaja**: registros, relaciones, sesiones y borrados creados o cambiados desde el último envío, en un fichero por envío (`changes/<máquina>/<fecha UTC>-<n>.jsonl.age`). Cada registro viaja con un identificador global (`sync_id`); los ids locales (`#123`) no salen de la máquina y pueden ser distintos en cada una.
+- **Qué no viaja**: los embeddings (cada máquina los recalcula), `config.json`, `secret` y la clave.
+- **Cifrado**: los ficheros se cifran con [age](https://age-encryption.org) (X25519, librería `filippo.io/age`). En el repositorio solo hay contenido ilegible.
+
+### Reglas de fusión
+
+| Caso | Resultado en todas las máquinas |
+| :--- | :--- |
+| Registro nuevo | Se crea igual, con sus temas, sesión y fechas |
+| Sustituido o invalidado en una máquina | Queda sustituido o invalidado también en las demás; nunca se reactiva |
+| Editado en una máquina sobre la versión de la otra | La edición sustituye a la versión anterior |
+| Editado en las dos sin haber visto la otra edición | Gana la edición más reciente; la otra queda como versión sustituida (historial) |
+| Dos registros vigentes con la misma `key` | Los dos siguen vigentes, la clave se la queda el más reciente, se relacionan como `contradicts` y `lodan sync pull` te pide que decidas cuál vale |
+| El mismo contenido creado en las dos | Queda un solo registro |
+| Borrado en una máquina | Se borra en todas; el borrado gana a cualquier edición |
+
+### Primera máquina
+
+```bash
+lodan sync init --repo git@github.com:<usuario>/lodan-sync.git
+lodan sync push
+```
+
+`init` clona el repositorio en `<datos>/sync-repo`, crea la clave si no existe (nunca la sobrescribe) y guarda `sync_repo`, `sync_machine` y `sync_key_file` en `config.json`. La clave se guarda por defecto en la carpeta de configuración del usuario (`%APPDATA%\lodan\sync.key` en Windows, `~/.config/lodan/sync.key` en Linux), fuera de la carpeta de datos, para que los backups de lodan no la lleven. git usa tu configuración y tus credenciales de siempre: lodan no guarda ninguna.
+
+### La clave
+
+> **Guarda una copia de la clave fuera del equipo** (por ejemplo, en tu gestor de contraseñas). Sin ella, el contenido del repositorio no se puede recuperar: nadie, tampoco lodan, puede descifrarlo.
+
+El fichero de la clave tiene una línea `AGE-SECRET-KEY-1…`. Para otra máquina, copia el fichero entero por un canal privado (gestor de contraseñas, USB), nunca por el repositorio.
+
+### Segunda máquina
+
+1. Instala lodan (`lodan install`).
+2. Copia la clave a la ruta por defecto de esa máquina (o indica otra con `--key`).
+3. Ejecuta:
+
+```bash
+lodan sync init --repo git@github.com:<usuario>/lodan-sync.git
+lodan sync pull
+lodan sync push
+```
+
+### Uso diario y sincronización automática
+
+- `lodan sync push`: envía los cambios locales.
+- `lodan sync pull`: trae e importa los cambios de las otras máquinas y muestra las contradicciones que tienes que resolver.
+- Con `"sync_interval_minutes": 15` en `config.json` (o `LODAN_SYNC_INTERVAL_MINUTES`), el servicio hace `push` y `pull` cada 15 minutos; los fallos quedan en el log del servicio y no lo paran. El servicio necesita acceso a las credenciales de git del usuario.
+
+---
+
+## Hooks de los clientes de IA
+
+Automatismos que no dependen de la disciplina de la IA. Los ejecuta el cliente en eventos de su ciclo de vida; leen el JSON del evento por la entrada estándar, nunca arrancan PostgreSQL y siempre salen con código 0, así que si lodan no está disponible la IA sigue sin más.
+
+| Comando | Evento | Qué hace |
+| :--- | :--- | :--- |
+| `lodan hook compact --client <nombre>` | Justo después de compactar el contexto | Escribe las instrucciones de recuperación (llamar a `recall` en lote con los temas en curso) y el resumen de la última sesión de lodan de ese cliente |
+| `lodan hook compact --client <nombre>` | `PostCompact` (con `compact_summary`) | Guarda el resumen de la compactación en la sesión abierta del cliente, sin cerrarla |
+| `lodan hook subagent-stop --client <nombre>` | Fin de un subagente | Guarda cada punto del bloque `## Key Learnings` de su informe (máximo 5) como `note` en el tema del proyecto (la carpeta raíz del repositorio git). Descarta lo que parezca un secreto o un DNI/NIE |
+
+`--client` debe ser el nombre con el que el cliente se presenta por MCP (`claude-code`, `opencode`, `antigravity-client`), para que el resumen sea el de sus sesiones.
 
 ---
 
@@ -408,7 +482,7 @@ Fuente: [`specs/001-nucleo-memoria/benchmark.md`](specs/001-nucleo-memoria/bench
 
 ```
 lodan/
-├── cmd/lodan/              # CLI principal (serve, db, migrate, status, install, doctor, uninstall, service, bench)
+├── cmd/lodan/              # CLI principal (serve, db, migrate, status, install, doctor, uninstall, service, bench, sync, hook)
 ├── internal/
 │   ├── memory/             # Guardar y revisar registros (remember, get, revise)
 │   ├── recall/             # Búsqueda por tema (recall)
@@ -418,6 +492,8 @@ lodan/
 │   ├── mcptools/           # Herramientas MCP y transportes stdio y HTTP
 │   ├── benchmark/          # Benchmark reproducible (lodan bench)
 │   ├── install/            # Instalador, doctor y desinstalador (clientes MCP, skill, Ollama, PostgreSQL)
+│   ├── gitsync/            # Sincronización cifrada entre máquinas por git (lodan sync)
+│   ├── hook/               # Hooks de los clientes de IA (lodan hook)
 │   ├── service/            # Supervisor del servicio y gestores de servicio por sistema operativo
 │   ├── database/           # Clúster de PostgreSQL, pool, migraciones, backup y restauración
 │   └── config/             # Configuración (puertos, rutas, variables LODAN_*)
