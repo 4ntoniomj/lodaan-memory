@@ -210,9 +210,27 @@ func (r *Resolver) ResolveWithin(ctx context.Context, raw []string, embedTimeout
 //
 // A slug is never mapped to a different topic just because their meanings are
 // close: two concrete tags such as two license plates embed almost the same and
-// must stay apart. Only a slug equal to an existing one once every "-" is
-// removed resolves to that existing topic.
+// must stay apart. Only a confirmed alias, or a slug equal to an existing one
+// once every "-" is removed, resolves to another topic.
 func (r *Resolver) resolveOne(ctx context.Context, slug string, embedDeadline time.Time) (Resolution, error) {
+	// 0. Alias confirmado: se resuelve su etiqueta canónica.
+	canonical, isAlias, err := r.Canonical(ctx, slug)
+	if err != nil {
+		return Resolution{}, err
+	}
+	if isAlias {
+		res, err := r.resolveSlug(ctx, canonical, embedDeadline)
+		if err != nil {
+			return Resolution{}, err
+		}
+		res.Requested, res.Equivalent = slug, res.Topic.Slug != slug
+		return res, nil
+	}
+	return r.resolveSlug(ctx, slug, embedDeadline)
+}
+
+// resolveSlug resolves slug without looking at the alias dictionary.
+func (r *Resolver) resolveSlug(ctx context.Context, slug string, embedDeadline time.Time) (Resolution, error) {
 	// 1. Existe: se usa tal cual y se marca como usado.
 	var id int32
 	err := r.pool.QueryRow(ctx,

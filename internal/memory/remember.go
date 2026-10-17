@@ -135,6 +135,31 @@ func (s *Service) Remember(ctx context.Context, tr *session.Tracker, items []Ite
 		return nil, fmt.Errorf("no se pudo confirmar el guardado: %w", err)
 	}
 
+	// 7. Sugerencias de alias para las etiquetas nuevas, solo frente a las que ya
+	// existían antes de esta llamada (si falla, no hay sugerencias).
+	var created []string
+	for _, i := range todo {
+		for _, res := range ps[i].saved.Topics {
+			if res.Created {
+				created = append(created, res.Topic.Slug)
+			}
+		}
+	}
+	for _, i := range todo {
+		for _, res := range ps[i].saved.Topics {
+			if !res.Created {
+				continue
+			}
+			sugs, err := s.topics.Suggest(ctx, res.Topic.Slug, ps[i].saved.ID, created, true)
+			if err != nil {
+				continue
+			}
+			for _, sg := range sugs {
+				ps[i].saved.Suggestions = append(ps[i].saved.Suggestions,
+					TagSuggestion{New: res.Topic.Slug, Existing: sg.Tag, Records: sg.Records})
+			}
+		}
+	}
 	return collectSaved(ps), nil
 }
 

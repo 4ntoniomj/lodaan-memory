@@ -396,7 +396,21 @@ func (s *Service) requestedTopic(ctx context.Context, names []string) (*topic.To
 		return nil, nil
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT id, slug FROM topics WHERE slug = ANY($1)`, slugs)
+	// Un alias confirmado se busca por su etiqueta canónica, y los guiones no cuentan.
+	compact := make([]string, len(slugs))
+	for i, slug := range slugs {
+		if s.topics != nil {
+			canonical, ok, err := s.topics.Canonical(ctx, slug)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				slug = canonical
+			}
+		}
+		compact[i] = strings.ReplaceAll(slug, "-", "")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, slug FROM topics WHERE replace(slug, '-', '') = ANY($1) ORDER BY id`, compact)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudieron buscar los temas pedidos: %w", err)
 	}
@@ -407,13 +421,15 @@ func (s *Service) requestedTopic(ctx context.Context, names []string) (*topic.To
 		if err := rows.Scan(&t.ID, &t.Slug); err != nil {
 			return nil, fmt.Errorf("no se pudo leer un tema: %w", err)
 		}
-		found[t.Slug] = t
+		if _, dup := found[strings.ReplaceAll(t.Slug, "-", "")]; !dup {
+			found[strings.ReplaceAll(t.Slug, "-", "")] = t
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("no se pudieron buscar los temas pedidos: %w", err)
 	}
-	for _, slug := range slugs { // en el orden pedido
-		if t, ok := found[slug]; ok {
+	for _, c := range compact { // en el orden pedido
+		if t, ok := found[c]; ok {
 			return &t, nil
 		}
 	}

@@ -141,6 +141,9 @@ func formatReviewed(saved []memory.Saved, candidates [][]recall.Item) string {
 	lines := make([]string, 0, len(saved))
 	for i, sv := range saved {
 		lines = append(lines, formatOneSaved(sv))
+		for _, sg := range sv.Suggestions {
+			lines = append(lines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
+		}
 		if i < len(candidates) {
 			for _, c := range candidates[i] {
 				lines = append(lines, "  revisa: "+c.Line())
@@ -198,6 +201,8 @@ type reviseInput struct {
 	Relation string     `json:"relation,omitempty" jsonschema:"Tipo de relación (por defecto related)"`
 	Title    string     `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
 	Content  string     `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
+	Tag      string     `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
+	WithTag  string     `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
 	Tags     []string   `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8); reemplazan a las actuales"`
 	Topics   []string   `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
@@ -206,12 +211,14 @@ type reviseInput struct {
 
 // reviseOp is one operation of the revise tool.
 type reviseOp struct {
-	ID       int64    `json:"id" jsonschema:"Id del registro"`
-	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation o reject_relation"`
+	ID       int64    `json:"id,omitempty" jsonschema:"Id del registro (no hace falta en alias ni reject_alias)"`
+	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias o reject_alias"`
 	WithID   int64    `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
 	Relation string   `json:"relation,omitempty" jsonschema:"related, contradicts, part_of o supersedes (por defecto related)"`
 	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
 	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
+	Tag      string   `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
+	WithTag  string   `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
 	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8)"`
 	Topics   []string `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
@@ -219,9 +226,9 @@ type reviseOp struct {
 
 func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in reviseInput) (*mcp.CallToolResult, any, error) {
 	var ops []reviseOp
-	if in.ID != 0 || in.Action != "" {
+	if in.ID != 0 || in.Action != "" || in.Tag != "" || in.WithTag != "" {
 		ops = append(ops, reviseOp{ID: in.ID, Action: in.Action, WithID: in.WithID, Relation: in.Relation,
-			Title: in.Title, Content: in.Content, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm})
+			Title: in.Title, Content: in.Content, Tag: in.Tag, WithTag: in.WithTag, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm})
 	}
 	ops = append(ops, in.Ops...)
 	if len(ops) == 0 {
@@ -242,6 +249,8 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 			Relation: op.Relation,
 			Title:    op.Title,
 			Content:  op.Content,
+			Tag:      op.Tag,
+			WithTag:  op.WithTag,
 			Tags:     op.Tags,
 			Topics:   op.Topics,
 			Confirm:  op.Confirm,

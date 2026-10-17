@@ -333,7 +333,7 @@ func TestE2E(t *testing.T) {
 	run("status", func(t *testing.T, _ Deps, srv *Server) {
 		cs := connect(t, srv, "test-client")
 		out := mustOK(t, cs, "status", map[string]any{})
-		wantContains(t, out, "BD: ok", "registros vigentes: 0", "pendientes de embedding: 0", "temas: 0", "sesiones: 0", "Ollama: no aplica")
+		wantContains(t, out, "BD: ok", "registros vigentes: 0", "pendientes de embedding: 0", "etiquetas: 0", "sesiones: 0", "Ollama: no aplica")
 
 		// status no abre sesión.
 		remember(t, cs, item("Una", "contenido uno", "note", "tema"))

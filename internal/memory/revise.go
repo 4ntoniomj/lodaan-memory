@@ -33,13 +33,15 @@ type lockedMemory struct {
 //     related (default), contradicts or part_of;
 //   - confirm_relation / reject_relation: sets the state of the relation of
 //     kind r.Relation (default related) between r.ID and r.WithID, in either direction.
+//   - alias / reject_alias: confirms that r.Tag is an alias of r.WithTag (and
+//     retags its records) or that they are different tags; no id needed.
 //
 // tr may be nil; otherwise activity is recorded on its session.
 func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (string, error) {
-	if r.ID <= 0 {
+	action := strings.ToLower(strings.TrimSpace(r.Action))
+	if r.ID <= 0 && action != "alias" && action != "reject_alias" {
 		return "", errors.New("hay que indicar el id del registro")
 	}
-	action := strings.ToLower(strings.TrimSpace(r.Action))
 	if tr != nil {
 		if err := tr.Touch(ctx); err != nil {
 			return "", err
@@ -61,8 +63,12 @@ func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (
 		return s.setRelationState(ctx, r, "confirmed", "confirmada")
 	case "reject_relation":
 		return s.setRelationState(ctx, r, "rejected", "rechazada")
+	case "alias":
+		return s.alias(ctx, r)
+	case "reject_alias":
+		return s.rejectAlias(ctx, r)
 	default:
-		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation)", r.Action)
+		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias)", r.Action)
 	}
 }
 

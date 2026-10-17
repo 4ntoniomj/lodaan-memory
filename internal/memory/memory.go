@@ -136,6 +136,9 @@ type Saved struct {
 	// MissingRelations lists the Item.Relate targets that do not exist; the item
 	// is saved anyway.
 	MissingRelations []int64
+	// Suggestions are the existing tags that may be the same as a tag this
+	// item created (pending alias suggestions).
+	Suggestions []TagSuggestion
 	// Vector is the embedding of the record (nil when Pending or Duplicate).
 	Vector []float32
 }
@@ -174,6 +177,8 @@ type Revision struct {
 	Relation string
 	Title    string
 	Content  string
+	// Tag and WithTag are the two tags of alias and reject_alias.
+	Tag, WithTag string
 	// Tags and Topics are the new tags for update, joined (tags first).
 	Tags   []string
 	Topics []string
