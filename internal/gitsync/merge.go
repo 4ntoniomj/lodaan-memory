@@ -1,0 +1,592 @@
+package gitsync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"lodan/internal/memory"
+)
+
+// applier applies the lines of batch files inside one import transaction.
+type applier struct {
+	tx             pgx.Tx
+	topics         map[string]int32 // slug -> id, cache for this transaction
+	contradictions []Contradiction
+}
+
+// local is the state of a local memory that an incoming line refers to.
+type local struct {
+	id        int64
+	syncID    string
+	rev       string
+	base      string
+	dirty     bool
+	status    string
+	key       string
+	title     string
+	content   string
+	kind      string
+	sessionID string
+	occurred  time.Time
+	created   time.Time
+	updated   time.Time
+}
+
+// newer reports whether version (at, tie) is more recent than (bt, btie). The tie-break on
+// the identifiers makes every machine take the same decision.
+func newer(at time.Time, tie string, bt time.Time, btie string) bool {
+	if !at.Equal(bt) {
+		return at.After(bt)
+	}
+	return tie > btie
+}
+
+// resolve returns the local sync_id an incoming sync_id refers to (itself or its alias).
+func (a *applier) resolve(ctx context.Context, syncID string) (string, error) {
+	var target string
+	err := a.tx.QueryRow(ctx, `SELECT sync_id::text FROM sync_aliases WHERE alias = $1::uuid`, syncID).Scan(&target)
+	switch {
+	case err == nil:
+		return target, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return syncID, nil
+	default:
+		return "", fmt.Errorf("no se pudo resolver el registro %s: %w", syncID, err)
+	}
+}
+
+func (a *applier) tombstoned(ctx context.Context, ids ...string) (bool, error) {
+	var found bool
+	err := a.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sync_tombstones WHERE sync_id = ANY($1::text[]::uuid[]))`, ids).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("no se pudieron comprobar los borrados: %w", err)
+	}
+	return found, nil
+}
+
+const localColumns = `id, sync_id::text, sync_rev::text, coalesce(sync_base::text, ''), sync_dirty, status::text,
+	coalesce(key, ''), title, content, kind::text, coalesce(session_id, ''), occurred_at, created_at, updated_at`
+
+func scanLocal(row pgx.Row) (*local, error) {
+	var l local
+	err := row.Scan(&l.id, &l.syncID, &l.rev, &l.base, &l.dirty, &l.status, &l.key, &l.title, &l.content, &l.kind,
+		&l.sessionID, &l.occurred, &l.created, &l.updated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo leer el registro local: %w", err)
+	}
+	return &l, nil
+}
+
+func (a *applier) localBySync(ctx context.Context, syncID string) (*local, error) {
+	return scanLocal(a.tx.QueryRow(ctx, `SELECT `+localColumns+` FROM memories WHERE sync_id = $1::uuid FOR UPDATE`, syncID))
+}
+
+// activeByHash and activeByKey return the active record (other than exceptID) with the same content hash or key.
+func (a *applier) activeByHash(ctx context.Context, hash []byte, exceptID int64) (*local, error) {
+	return scanLocal(a.tx.QueryRow(ctx, `SELECT `+localColumns+` FROM memories
+		WHERE content_hash = $1 AND status = 'active' AND id <> $2 FOR UPDATE`, hash, exceptID))
+}
+
+func (a *applier) activeByKey(ctx context.Context, key string, exceptID int64) (*local, error) {
+	return scanLocal(a.tx.QueryRow(ctx, `SELECT `+localColumns+` FROM memories
+		WHERE key = $1 AND status = 'active' AND id <> $2 FOR UPDATE`, key, exceptID))
+}
+
+// knownRev reports whether the record has already had version rev on this machine.
+func (a *applier) knownRev(ctx context.Context, syncID, rev string) (bool, error) {
+	var found bool
+	err := a.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sync_revs WHERE sync_id = $1::uuid AND rev = $2::uuid)`, syncID, rev).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("no se pudieron leer las versiones del registro: %w", err)
+	}
+	return found, nil
+}
+
+func (a *applier) addRev(ctx context.Context, syncID, rev string) error {
+	_, err := a.tx.Exec(ctx, `INSERT INTO sync_revs (sync_id, rev) VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`, syncID, rev)
+	if err != nil {
+		return fmt.Errorf("no se pudo guardar la versión del registro: %w", err)
+	}
+	return nil
+}
+
+// topicIDs returns the ids of the topics with these slugs, creating the missing ones (their
+// embedding is computed later by the maintenance worker).
+func (a *applier) topicIDs(ctx context.Context, slugs []string) ([]int32, error) {
+	ids := make([]int32, 0, len(slugs))
+	for _, slug := range slugs {
+		if id, ok := a.topics[slug]; ok {
+			ids = append(ids, id)
+			continue
+		}
+		var id int32
+		if err := a.tx.QueryRow(ctx, `INSERT INTO topics (slug) VALUES ($1)
+			ON CONFLICT (slug) DO UPDATE SET last_used_at = greatest(topics.last_used_at, now())
+			RETURNING id`, slug).Scan(&id); err != nil {
+			return nil, fmt.Errorf("no se pudo crear el tema %q: %w", slug, err)
+		}
+		a.topics[slug] = id
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// setTopics replaces the topics of a memory.
+func (a *applier) setTopics(ctx context.Context, memoryID int64, slugs []string, kind, status string, ts time.Time) error {
+	ids, err := a.topicIDs(ctx, slugs)
+	if err != nil {
+		return err
+	}
+	if _, err := a.tx.Exec(ctx, `DELETE FROM memory_topics WHERE memory_id = $1 AND NOT (topic_id = ANY($2::int[]))`, memoryID, ids); err != nil {
+		return fmt.Errorf("no se pudieron actualizar los temas: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err = a.tx.Exec(ctx, `INSERT INTO memory_topics (topic_id, memory_id, kind, active, ts)
+		SELECT unnest($1::int[]), $2::bigint, $3::text::memory_kind, $4::boolean, $5::timestamptz
+		ON CONFLICT (topic_id, memory_id) DO UPDATE SET kind = EXCLUDED.kind, active = EXCLUDED.active, ts = EXCLUDED.ts`,
+		ids, memoryID, kind, status == string(memory.StatusActive), ts)
+	if err != nil {
+		return fmt.Errorf("no se pudieron guardar los temas: %w", err)
+	}
+	return nil
+}
+
+func (a *applier) sessionOrNil(ctx context.Context, id string) (any, error) {
+	if id == "" {
+		return nil, nil
+	}
+	var found bool
+	if err := a.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1)`, id).Scan(&found); err != nil {
+		return nil, fmt.Errorf("no se pudo comprobar la sesión: %w", err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return id, nil
+}
+
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (a *applier) relate(ctx context.Context, source, target int64, kind string) error {
+	_, err := a.tx.Exec(ctx, `INSERT INTO memory_relations (source_id, target_id, kind, state)
+		VALUES ($1, $2, $3::text::relation_kind, 'confirmed')
+		ON CONFLICT (source_id, target_id, kind) DO UPDATE SET state = 'confirmed'`, source, target, kind)
+	if err != nil {
+		return fmt.Errorf("no se pudo crear la relación %s: %w", kind, err)
+	}
+	return nil
+}
+
+// applySession joins a session by id: the most recent activity decides the end and summary.
+func (a *applier) applySession(ctx context.Context, l sessionLine) error {
+	var ended any
+	if l.EndedAt != nil {
+		ended = *l.EndedAt
+	}
+	_, err := a.tx.Exec(ctx, `INSERT INTO sessions AS s (id, client, started_at, last_activity_at, ended_at, summary)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO UPDATE SET
+		  started_at = least(s.started_at, EXCLUDED.started_at),
+		  last_activity_at = greatest(s.last_activity_at, EXCLUDED.last_activity_at),
+		  ended_at = CASE WHEN EXCLUDED.last_activity_at >= s.last_activity_at
+		                  THEN coalesce(EXCLUDED.ended_at, s.ended_at) ELSE coalesce(s.ended_at, EXCLUDED.ended_at) END,
+		  summary = CASE WHEN EXCLUDED.last_activity_at >= s.last_activity_at
+		                 THEN coalesce(nullif(EXCLUDED.summary, ''), s.summary) ELSE coalesce(nullif(s.summary, ''), EXCLUDED.summary) END`,
+		l.ID, l.Client, l.StartedAt, l.LastActivityAt, ended, nullable(l.Summary))
+	if err != nil {
+		return fmt.Errorf("no se pudo importar la sesión %s: %w", l.ID, err)
+	}
+	ids, err := a.topicIDs(ctx, l.Topics)
+	if err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		if _, err := a.tx.Exec(ctx, `INSERT INTO session_topics (session_id, topic_id)
+			SELECT $1::text, unnest($2::int[]) ON CONFLICT DO NOTHING`, l.ID, ids); err != nil {
+			return fmt.Errorf("no se pudieron importar los temas de la sesión %s: %w", l.ID, err)
+		}
+	}
+	return nil
+}
+
+// applyMemory merges one incoming memory (rules S6 a-f).
+func (a *applier) applyMemory(ctx context.Context, in memoryLine) error {
+	syncID, err := a.resolve(ctx, in.SyncID)
+	if err != nil {
+		return err
+	}
+	if gone, err := a.tombstoned(ctx, in.SyncID, syncID); err != nil || gone {
+		return err
+	}
+	l, err := a.localBySync(ctx, syncID)
+	if err != nil {
+		return err
+	}
+	if l == nil {
+		return a.insertMemory(ctx, in)
+	}
+	return a.mergeMemory(ctx, l, in)
+}
+
+// insertMemory creates a record that does not exist locally.
+func (a *applier) insertMemory(ctx context.Context, in memoryLine) error {
+	hash := memory.ContentHash(in.Content)
+	if in.Status != string(memory.StatusActive) {
+		_, err := a.insertRow(ctx, in, hash, in.Key)
+		return err
+	}
+	// The same content already exists here as another record: both are the same record.
+	same, err := a.activeByHash(ctx, hash, 0)
+	if err != nil {
+		return err
+	}
+	if same != nil {
+		return a.alias(ctx, in, same)
+	}
+	var other *local
+	if in.Key != "" {
+		if other, err = a.activeByKey(ctx, in.Key, 0); err != nil {
+			return err
+		}
+	}
+	if other == nil {
+		_, err := a.insertRow(ctx, in, hash, in.Key)
+		return err
+	}
+	// Two active records with the same key: the most recent keeps it.
+	if newer(in.UpdatedAt, in.SyncID, other.updated, other.syncID) {
+		if _, err := a.tx.Exec(ctx, `UPDATE memories SET key = NULL WHERE id = $1`, other.id); err != nil {
+			return fmt.Errorf("no se pudo quitar la clave del registro #%d: %w", other.id, err)
+		}
+		id, err := a.insertRow(ctx, in, hash, in.Key)
+		if err != nil {
+			return err
+		}
+		return a.contradict(ctx, id, other.id, in.Key)
+	}
+	id, err := a.insertRow(ctx, in, hash, "")
+	if err != nil {
+		return err
+	}
+	return a.contradict(ctx, other.id, id, in.Key)
+}
+
+func (a *applier) contradict(ctx context.Context, kept, other int64, key string) error {
+	if err := a.relate(ctx, kept, other, "contradicts"); err != nil {
+		return err
+	}
+	a.contradictions = append(a.contradictions, Contradiction{Key: key, KeptID: kept, OtherID: other})
+	return nil
+}
+
+func (a *applier) insertRow(ctx context.Context, in memoryLine, hash []byte, key string) (int64, error) {
+	sid, err := a.sessionOrNil(ctx, in.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = a.tx.QueryRow(ctx, `INSERT INTO memories
+		(sync_id, sync_rev, sync_base, kind, status, title, content, key, content_hash, session_id, occurred_at, created_at, updated_at)
+		VALUES ($1::uuid, $2::uuid, $2::uuid, $3::text::memory_kind, $4::text::memory_status, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id`,
+		in.SyncID, in.Rev, in.Kind, in.Status, in.Title, in.Content, nullable(key), hash, sid,
+		in.OccurredAt, in.CreatedAt, in.UpdatedAt).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("no se pudo importar el registro %s: %w", in.SyncID, err)
+	}
+	if err := a.setTopics(ctx, id, in.Topics, in.Kind, in.Status, in.OccurredAt); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// alias records that the incoming record is the local one with the same content.
+func (a *applier) alias(ctx context.Context, in memoryLine, same *local) error {
+	if _, err := a.tx.Exec(ctx, `INSERT INTO sync_aliases (alias, sync_id) VALUES ($1::uuid, $2::uuid)
+		ON CONFLICT (alias) DO UPDATE SET sync_id = EXCLUDED.sync_id`, in.SyncID, same.syncID); err != nil {
+		return fmt.Errorf("no se pudo unir el registro %s con #%d: %w", in.SyncID, same.id, err)
+	}
+	if err := a.addRev(ctx, same.syncID, in.Rev); err != nil {
+		return err
+	}
+	if _, err := a.tx.Exec(ctx, `UPDATE memories SET sync_base = $2::uuid WHERE id = $1`, same.id, in.Rev); err != nil {
+		return fmt.Errorf("no se pudo unir el registro %s con #%d: %w", in.SyncID, same.id, err)
+	}
+	return nil
+}
+
+// mergeMemory merges an incoming version into an existing local record.
+func (a *applier) mergeMemory(ctx context.Context, l *local, in memoryLine) error {
+	known, err := a.knownRev(ctx, l.syncID, in.Rev)
+	if err != nil {
+		return err
+	}
+
+	// Status only moves forward: a retired record is never reactivated.
+	status := l.status
+	if in.Status != string(memory.StatusActive) &&
+		(l.status == string(memory.StatusActive) || (l.status != in.Status && in.UpdatedAt.After(l.updated))) {
+		status = in.Status
+	}
+
+	switch {
+	case known:
+		// The incoming content is one this record already had: only status and topics.
+		updated := l.updated
+		if in.UpdatedAt.After(updated) {
+			updated = in.UpdatedAt
+		}
+		if _, err := a.tx.Exec(ctx, `UPDATE memories SET status = $2::text::memory_status, updated_at = $3 WHERE id = $1`,
+			l.id, status, updated); err != nil {
+			return fmt.Errorf("no se pudo actualizar el registro #%d: %w", l.id, err)
+		}
+		if in.UpdatedAt.After(l.updated) {
+			return a.setTopics(ctx, l.id, in.Topics, l.kind, status, l.occurred)
+		}
+		return a.syncTopicsActive(ctx, l.id, status)
+
+	case in.Base != "" && !l.dirty && (in.Base == l.rev || in.Base == l.base):
+		// Edited on top of the version this machine has: it simply replaces it.
+		return a.applyContent(ctx, l, in, status)
+
+	default:
+		// Both machines edited the record without seeing each other's edit: the most recent
+		// wins and the other version stays as a superseded copy.
+		if newer(in.UpdatedAt, in.Rev, l.updated, l.rev) {
+			copyID, err := a.insertCopy(ctx, l.title, l.content, l.kind, l.sessionID, l.occurred, l.created, l.updated, l.id)
+			if err != nil {
+				return err
+			}
+			if err := a.applyContent(ctx, l, in, status); err != nil {
+				return err
+			}
+			return a.relate(ctx, l.id, copyID, "supersedes")
+		}
+		copyID, err := a.insertCopy(ctx, in.Title, in.Content, in.Kind, in.SessionID, in.OccurredAt, in.CreatedAt, in.UpdatedAt, l.id)
+		if err != nil {
+			return err
+		}
+		if err := a.addRev(ctx, l.syncID, in.Rev); err != nil {
+			return err
+		}
+		if status != l.status {
+			if _, err := a.tx.Exec(ctx, `UPDATE memories SET status = $2::text::memory_status WHERE id = $1`, l.id, status); err != nil {
+				return fmt.Errorf("no se pudo actualizar el registro #%d: %w", l.id, err)
+			}
+			if err := a.syncTopicsActive(ctx, l.id, status); err != nil {
+				return err
+			}
+		}
+		return a.relate(ctx, l.id, copyID, "supersedes")
+	}
+}
+
+// applyContent replaces the content of a local record with the incoming version.
+func (a *applier) applyContent(ctx context.Context, l *local, in memoryLine, status string) error {
+	hash := memory.ContentHash(in.Content)
+	key := in.Key
+	var lostKey *local
+	if status == string(memory.StatusActive) {
+		if same, err := a.activeByHash(ctx, hash, l.id); err != nil {
+			return err
+		} else if same != nil {
+			// Another active record already says the same: this one is retired in its favour.
+			status = string(memory.StatusSuperseded)
+			if err := a.relate(ctx, same.id, l.id, "supersedes"); err != nil {
+				return err
+			}
+		}
+	}
+	if status == string(memory.StatusActive) && key != "" {
+		other, err := a.activeByKey(ctx, key, l.id)
+		if err != nil {
+			return err
+		}
+		if other != nil {
+			if newer(in.UpdatedAt, l.syncID, other.updated, other.syncID) {
+				if _, err := a.tx.Exec(ctx, `UPDATE memories SET key = NULL WHERE id = $1`, other.id); err != nil {
+					return fmt.Errorf("no se pudo quitar la clave del registro #%d: %w", other.id, err)
+				}
+				lostKey = other
+			} else {
+				key = ""
+				if err := a.contradict(ctx, other.id, l.id, in.Key); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	sid, err := a.sessionOrNil(ctx, in.SessionID)
+	if err != nil {
+		return err
+	}
+	if _, err := a.tx.Exec(ctx, `UPDATE memories SET
+		title = $2, content = $3, content_hash = $4, kind = $5::text::memory_kind, key = $6,
+		status = $7::text::memory_status, occurred_at = $8, updated_at = $9, session_id = coalesce($10, session_id),
+		sync_rev = $11::uuid, sync_base = $11::uuid, sync_dirty = false,
+		embedding = CASE WHEN content = $3 AND title = $2 THEN embedding END,
+		embedding_model = CASE WHEN content = $3 AND title = $2 THEN embedding_model END
+		WHERE id = $1`,
+		l.id, in.Title, in.Content, hash, in.Kind, nullable(key), status, in.OccurredAt, in.UpdatedAt, sid, in.Rev); err != nil {
+		return fmt.Errorf("no se pudo actualizar el registro #%d: %w", l.id, err)
+	}
+	if err := a.setTopics(ctx, l.id, in.Topics, in.Kind, status, in.OccurredAt); err != nil {
+		return err
+	}
+	if lostKey != nil {
+		return a.contradict(ctx, l.id, lostKey.id, key)
+	}
+	return nil
+}
+
+// syncTopicsActive keeps memory_topics.active in line with the record status.
+func (a *applier) syncTopicsActive(ctx context.Context, id int64, status string) error {
+	if _, err := a.tx.Exec(ctx, `UPDATE memory_topics SET active = $2 WHERE memory_id = $1`, id, status == string(memory.StatusActive)); err != nil {
+		return fmt.Errorf("no se pudieron actualizar los temas del registro #%d: %w", id, err)
+	}
+	return nil
+}
+
+// insertCopy keeps a losing version as a superseded record with the topics of the record.
+func (a *applier) insertCopy(ctx context.Context, title, content, kind, sessionID string, occurred, created, updated time.Time, of int64) (int64, error) {
+	sid, err := a.sessionOrNil(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := a.tx.QueryRow(ctx, `INSERT INTO memories
+		(kind, status, title, content, content_hash, session_id, occurred_at, created_at, updated_at)
+		VALUES ($1::text::memory_kind, 'superseded', $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		kind, title, content, memory.ContentHash(content), sid, occurred, created, updated).Scan(&id); err != nil {
+		return 0, fmt.Errorf("no se pudo guardar la versión anterior: %w", err)
+	}
+	if _, err := a.tx.Exec(ctx, `INSERT INTO memory_topics (topic_id, memory_id, kind, active, ts)
+		SELECT topic_id, $2, $3::text::memory_kind, false, $4 FROM memory_topics WHERE memory_id = $1`,
+		of, id, kind, occurred); err != nil {
+		return 0, fmt.Errorf("no se pudieron copiar los temas de la versión anterior: %w", err)
+	}
+	return id, nil
+}
+
+// applyRelation joins a relation by (source, target, kind); the most recent change decides its
+// state. If a record has not arrived yet, the relation waits in sync_pending_relations.
+func (a *applier) applyRelation(ctx context.Context, in relationLine) error {
+	src, err := a.resolve(ctx, in.Source)
+	if err != nil {
+		return err
+	}
+	dst, err := a.resolve(ctx, in.Target)
+	if err != nil {
+		return err
+	}
+	if gone, err := a.tombstoned(ctx, in.Source, in.Target, src, dst); err != nil || gone {
+		return err
+	}
+	var srcID, dstID int64
+	err = a.tx.QueryRow(ctx, `SELECT (SELECT id FROM memories WHERE sync_id = $1::uuid), (SELECT id FROM memories WHERE sync_id = $2::uuid)`,
+		src, dst).Scan(nullInt(&srcID), nullInt(&dstID))
+	if err != nil {
+		return fmt.Errorf("no se pudieron buscar los registros de la relación: %w", err)
+	}
+	if srcID == 0 || dstID == 0 {
+		_, err := a.tx.Exec(ctx, `INSERT INTO sync_pending_relations (source, target, kind, state, created_at, updated_at)
+			VALUES ($1::uuid, $2::uuid, $3::text::relation_kind, $4::text::relation_state, $5, $6)
+			ON CONFLICT (source, target, kind) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+			WHERE sync_pending_relations.updated_at < EXCLUDED.updated_at`,
+			in.Source, in.Target, in.Kind, in.State, in.CreatedAt, in.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("no se pudo guardar la relación pendiente: %w", err)
+		}
+		return nil
+	}
+	_, err = a.tx.Exec(ctx, `INSERT INTO memory_relations AS r (source_id, target_id, kind, state, created_at, updated_at)
+		VALUES ($1, $2, $3::text::relation_kind, $4::text::relation_state, $5, $6)
+		ON CONFLICT (source_id, target_id, kind) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+		WHERE r.updated_at < EXCLUDED.updated_at`,
+		srcID, dstID, in.Kind, in.State, in.CreatedAt, in.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("no se pudo importar la relación: %w", err)
+	}
+	return nil
+}
+
+// retryPendingRelations applies the waiting relations whose records have arrived.
+func (a *applier) retryPendingRelations(ctx context.Context) error {
+	rows, err := a.tx.Query(ctx, `SELECT source::text, target::text, kind::text, state::text, created_at, updated_at FROM sync_pending_relations`)
+	if err != nil {
+		return err
+	}
+	pending, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (relationLine, error) {
+		l := relationLine{Type: typeRelation}
+		err := r.Scan(&l.Source, &l.Target, &l.Kind, &l.State, &l.CreatedAt, &l.UpdatedAt)
+		return l, err
+	})
+	if err != nil {
+		return err
+	}
+	for _, l := range pending {
+		if _, err := a.tx.Exec(ctx, `DELETE FROM sync_pending_relations WHERE source = $1::uuid AND target = $2::uuid AND kind = $3::text::relation_kind`,
+			l.Source, l.Target, l.Kind); err != nil {
+			return err
+		}
+		// applyRelation stores it again if a record is still missing.
+		if err := a.applyRelation(ctx, l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyDeletion deletes the record everywhere; the tombstone keeps later copies from
+// recreating it.
+func (a *applier) applyDeletion(ctx context.Context, in deletionLine) error {
+	syncID, err := a.resolve(ctx, in.SyncID)
+	if err != nil {
+		return err
+	}
+	if _, err := a.tx.Exec(ctx, `DELETE FROM memories WHERE sync_id = ANY($1::text[]::uuid[])`, []string{in.SyncID, syncID}); err != nil {
+		return fmt.Errorf("no se pudo borrar el registro %s: %w", in.SyncID, err)
+	}
+	if _, err := a.tx.Exec(ctx, `INSERT INTO sync_tombstones (sync_id, deleted_at) SELECT unnest($1::text[]::uuid[]), $2
+		ON CONFLICT (sync_id) DO NOTHING`, []string{in.SyncID, syncID}, in.DeletedAt); err != nil {
+		return fmt.Errorf("no se pudo registrar el borrado de %s: %w", in.SyncID, err)
+	}
+	if _, err := a.tx.Exec(ctx, `DELETE FROM sync_pending_relations WHERE source = ANY($1::text[]::uuid[]) OR target = ANY($1::text[]::uuid[])`,
+		[]string{in.SyncID, syncID}); err != nil {
+		return fmt.Errorf("no se pudieron limpiar las relaciones pendientes de %s: %w", in.SyncID, err)
+	}
+	return nil
+}
+
+// nullInt scans a nullable bigint into dst, leaving 0 for NULL.
+func nullInt(dst *int64) any {
+	return &nullableInt{dst: dst}
+}
+
+type nullableInt struct{ dst *int64 }
+
+func (n *nullableInt) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*n.dst = 0
+	case int64:
+		*n.dst = v
+	default:
+		return fmt.Errorf("tipo inesperado %T", src)
+	}
+	return nil
+}
