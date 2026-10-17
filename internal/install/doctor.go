@@ -177,6 +177,11 @@ func (in *Installer) Doctor(ctx context.Context) []CheckResult {
 	} else {
 		add("Instrucciones globales", LevelWarn, detail, reinstall)
 	}
+	if ok, detail := CheckHooks(in.Env, bin); ok {
+		add("Hooks de los clientes", LevelOK, detail, "")
+	} else {
+		add("Hooks de los clientes", LevelWarn, detail, reinstall)
+	}
 
 	nErrors, nWarnings := 0, 0
 	for _, r := range results {

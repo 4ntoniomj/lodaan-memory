@@ -32,6 +32,10 @@ import (
 // RecoveryInstructions is what the AI receives right after a compaction.
 const RecoveryInstructions = "lodan: el contexto se acaba de compactar. Antes de seguir, llama una vez a recall de lodan en lote (queries) con los temas en curso de esta conversación y continúa con lo que devuelva."
 
+// StartInstructions is what the AI receives when a conversation starts in a client that has
+// no compaction event (Antigravity).
+const StartInstructions = "lodan: conversación nueva. Antes de responder sobre un tema, llama una vez a recall de lodan en lote (queries) con los temas de la conversación."
+
 // Limits of what the hooks store.
 const (
 	maxSummaryRunes = 2000 // same cap as session.Tracker.End
@@ -88,8 +92,20 @@ func Compact(ctx context.Context, deps *Deps, client string, in io.Reader, out i
 	if _, err := fmt.Fprintln(out, RecoveryInstructions); err != nil {
 		return err
 	}
+	line, err := LastSessionLine(ctx, deps, client)
+	if err != nil || line == "" {
+		return err
+	}
+	_, err = fmt.Fprintln(out, line)
+	return err
+}
+
+// LastSessionLine returns "Última sesión de lodan (<client>, <date>): <summary>" for the
+// client's most recently ended session with a summary, or "" when there is none (or no
+// database).
+func LastSessionLine(ctx context.Context, deps *Deps, client string) (string, error) {
 	if deps == nil {
-		return nil
+		return "", nil
 	}
 	var ended time.Time
 	var summary string
@@ -97,14 +113,13 @@ func Compact(ctx context.Context, deps *Deps, client string, in io.Reader, out i
 		WHERE client = $1 AND ended_at IS NOT NULL AND coalesce(summary, '') <> ''
 		ORDER BY ended_at DESC LIMIT 1`, client).Scan(&ended, &summary)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return fmt.Errorf("no se pudo leer la última sesión: %w", err)
+		return "", fmt.Errorf("no se pudo leer la última sesión: %w", err)
 	}
-	_, err = fmt.Fprintf(out, "Última sesión de lodan (%s, %s): %s\n", client, ended.Local().Format("2006-01-02"),
-		strings.ReplaceAll(summary, "\n", " "))
-	return err
+	return fmt.Sprintf("Última sesión de lodan (%s, %s): %s", client, ended.Local().Format("2006-01-02"),
+		strings.ReplaceAll(summary, "\n", " ")), nil
 }
 
 // storeSummary saves the compaction summary in the client's most recently active open

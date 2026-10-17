@@ -360,6 +360,14 @@ Automatismos que no dependen de la disciplina de la IA. Los ejecuta el cliente e
 
 `--client` debe ser el nombre con el que el cliente se presenta por MCP (`claude-code`, `opencode`, `antigravity-client`), para que el resumen sea el de sus sesiones.
 
+`lodan install` los registra en cada cliente instalado, sin tocar los hooks que ya tengas (y `lodan uninstall` los quita; `lodan doctor` comprueba que están):
+
+| Cliente | Dónde | Qué se registra | Qué no se puede |
+| :--- | :--- | :--- | :--- |
+| Claude Code | `~/.claude/settings.json` | `SessionStart` (matcher `compact`) y `PostCompact` → `hook compact`; `SubagentStop` y `PostToolUse` sobre `SubagentHandback` → `hook subagent-stop` | — |
+| opencode 2.x | `~/.config/opencode/plugins/lodan.js` | Plugin v2: al terminar una compactación guarda el resumen e inyecta las instrucciones; al terminar un subagente (herramienta `subagent`, también en segundo plano) guarda sus Key Learnings | Si el proveedor compacta por su cuenta (compactación nativa), no hay resumen que guardar |
+| Antigravity | `~/.gemini/config/hooks.json` (grupo `lodan`) | `SessionStart` → `hook compact --format antigravity`: al empezar una conversación inyecta las instrucciones y el resumen de la última sesión | Antigravity no tiene evento de compactación ni de fin de subagente: no se simulan |
+
 ---
 
 ## Documentación técnica
