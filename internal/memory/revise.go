@@ -108,10 +108,13 @@ func requireActive(id int64, m lockedMemory, what string) error {
 // update implements the "update" action.
 func (s *Service) update(ctx context.Context, r Revision) (string, error) {
 	title, content := strings.TrimSpace(r.Title), strings.TrimSpace(r.Content)
-	if title == "" && content == "" && len(r.Topics) == 0 {
+	names, err := tagNames(r.Tags, r.Topics)
+	if err != nil {
+		return "", err
+	}
+	if title == "" && content == "" && len(r.Tags) == 0 && len(r.Topics) == 0 {
 		return "", errors.New("update necesita al menos un título, un contenido o temas nuevos")
 	}
-	var err error
 	if title != "" {
 		if title, err = validateText("título", title, maxTitleLen); err != nil {
 			return "", err
@@ -167,8 +170,8 @@ func (s *Service) update(ctx context.Context, r Revision) (string, error) {
 	}
 
 	var topics []topic.Resolution
-	if len(r.Topics) > 0 {
-		if topics, err = s.topics.Resolve(ctx, r.Topics); err != nil {
+	if len(r.Tags) > 0 || len(r.Topics) > 0 {
+		if topics, err = s.topics.Resolve(ctx, names); err != nil {
 			return "", err
 		}
 		if len(topics) == 0 {

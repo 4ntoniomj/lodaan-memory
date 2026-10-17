@@ -38,6 +38,8 @@ const (
 	maxContentLen = 8000
 	// defaultTopic is used when an item has no usable topic.
 	defaultTopic = "general"
+	// MaxTags is the maximum number of distinct tags of a record.
+	MaxTags = 8
 	// fillBatchSize is the number of pending records embedded per transaction.
 	fillBatchSize = 32
 )
@@ -89,7 +91,9 @@ const (
 type Item struct {
 	Title, Content string
 	Kind           Kind
-	// Topics are free-form topic names; empty means "general".
+	// Tags and Topics are free-form tag names, joined (tags first); none
+	// means "general". At most MaxTags distinct ones after normalization.
+	Tags   []string
 	Topics []string
 	// Key, if not empty, makes the item replace the active record with the same key.
 	Key string
@@ -170,7 +174,9 @@ type Revision struct {
 	Relation string
 	Title    string
 	Content  string
-	Topics   []string
+	// Tags and Topics are the new tags for update, joined (tags first).
+	Tags   []string
+	Topics []string
 	// Confirm must be true for delete.
 	Confirm bool
 }

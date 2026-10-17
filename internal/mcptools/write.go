@@ -11,6 +11,7 @@ import (
 
 	"lodan/internal/memory"
 	"lodan/internal/recall"
+	"lodan/internal/topic"
 )
 
 // rememberInput is the input of the remember tool.
@@ -22,7 +23,8 @@ type rememberItem struct {
 	Title      string        `json:"title" jsonschema:"Título corto"`
 	Content    string        `json:"content" jsonschema:"Contenido autosuficiente"`
 	Kind       string        `json:"kind" jsonschema:"Tipo de registro"`
-	Topics     []string      `json:"topics,omitempty" jsonschema:"1-3 temas libres; reutiliza los existentes"`
+	Tags       []string      `json:"tags,omitempty" jsonschema:"Etiquetas (máx. 8): generales (#agridemur) y concretas (#coche-1234abc); reutiliza las existentes"`
+	Topics     []string      `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Key        string        `json:"key,omitempty" jsonschema:"Clave de un dato que cambia; sustituye al vigente con la misma clave"`
 	OccurredAt string        `json:"occurred_at,omitempty" jsonschema:"Cuándo ocurrió: RFC3339 o AAAA-MM-DD, hora local (por defecto, ahora)"`
 	Relate     []relateInput `json:"relate,omitempty" jsonschema:"Registros existentes con los que se relaciona (relación confirmada)"`
@@ -53,6 +55,7 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 			Title:      it.Title,
 			Content:    it.Content,
 			Kind:       memory.Kind(it.Kind),
+			Tags:       it.Tags,
 			Topics:     it.Topics,
 			Key:        it.Key,
 			OccurredAt: when,
@@ -153,14 +156,7 @@ func formatOneSaved(sv memory.Saved) string {
 	}
 	parts := []string{fmt.Sprintf("#%d guardado", sv.ID)}
 	if len(sv.Topics) > 0 {
-		names := make([]string, len(sv.Topics))
-		for i, r := range sv.Topics {
-			names[i] = r.Topic.Slug
-			if r.Equivalent {
-				names[i] += fmt.Sprintf(" (%s→%s)", r.Requested, r.Topic.Slug)
-			}
-		}
-		parts = append(parts, "temas: "+strings.Join(names, ", "))
+		parts = append(parts, "etiquetas: "+formatTags(sv.Topics))
 	}
 	if sv.Pending {
 		parts = append(parts, "embedding y parecidos pendientes (se calculan en segundo plano)")
@@ -178,6 +174,21 @@ func formatOneSaved(sv memory.Saved) string {
 	return strings.Join(parts, " · ")
 }
 
+// formatTags renders resolved tags as "#a, #requested→#canonical, #new (nueva)".
+func formatTags(rs []topic.Resolution) string {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = "#" + r.Topic.Slug
+		if r.Equivalent {
+			names[i] = fmt.Sprintf("#%s→#%s", r.Requested, r.Topic.Slug)
+		}
+		if r.Created {
+			names[i] += " (nueva)"
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 // reviseInput is the input of the revise tool: one operation in the top-level
 // fields, several in ops, or both (the top-level one goes first).
 type reviseInput struct {
@@ -187,7 +198,8 @@ type reviseInput struct {
 	Relation string     `json:"relation,omitempty" jsonschema:"Tipo de relación (por defecto related)"`
 	Title    string     `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
 	Content  string     `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
-	Topics   []string   `json:"topics,omitempty" jsonschema:"Temas nuevos (update); reemplazan a los actuales"`
+	Tags     []string   `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8); reemplazan a las actuales"`
+	Topics   []string   `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
 	Ops      []reviseOp `json:"ops,omitempty" jsonschema:"Varias operaciones en una sola llamada (máx. 200 en total), con los mismos campos; se aplican en orden y una que falle no frena las demás"`
 }
@@ -200,7 +212,8 @@ type reviseOp struct {
 	Relation string   `json:"relation,omitempty" jsonschema:"related, contradicts, part_of o supersedes (por defecto related)"`
 	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
 	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
-	Topics   []string `json:"topics,omitempty" jsonschema:"Temas nuevos (update)"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8)"`
+	Topics   []string `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
 }
 
@@ -208,7 +221,7 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 	var ops []reviseOp
 	if in.ID != 0 || in.Action != "" {
 		ops = append(ops, reviseOp{ID: in.ID, Action: in.Action, WithID: in.WithID, Relation: in.Relation,
-			Title: in.Title, Content: in.Content, Topics: in.Topics, Confirm: in.Confirm})
+			Title: in.Title, Content: in.Content, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm})
 	}
 	ops = append(ops, in.Ops...)
 	if len(ops) == 0 {
@@ -229,6 +242,7 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 			Relation: op.Relation,
 			Title:    op.Title,
 			Content:  op.Content,
+			Tags:     op.Tags,
 			Topics:   op.Topics,
 			Confirm:  op.Confirm,
 		})

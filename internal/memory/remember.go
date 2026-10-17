@@ -161,11 +161,9 @@ func prepareItem(it Item, now time.Time) (prepared, error) {
 		return prepared{}, err
 	}
 
-	var names []string
-	for _, n := range it.Topics {
-		if topic.Normalize(n) != "" {
-			names = append(names, n)
-		}
+	names, err := tagNames(it.Tags, it.Topics)
+	if err != nil {
+		return prepared{}, err
 	}
 	if len(names) == 0 {
 		names = []string{defaultTopic}
@@ -180,6 +178,26 @@ func prepareItem(it Item, now time.Time) (prepared, error) {
 		names:    names,
 		relate:   relate,
 	}, nil
+}
+
+// tagNames joins tags and topics (tags first) and keeps the usable ones,
+// without repeats after normalization. More than MaxTags distinct tags is an
+// error. A leading "#" needs no handling: Normalize drops it.
+func tagNames(tags, topics []string) ([]string, error) {
+	var names []string
+	seen := make(map[string]bool)
+	for _, n := range append(append([]string(nil), tags...), topics...) {
+		slug := topic.Normalize(n)
+		if slug == "" || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		names = append(names, n)
+	}
+	if len(names) > MaxTags {
+		return nil, fmt.Errorf("como máximo %d etiquetas (llegaron %d)", MaxTags, len(names))
+	}
+	return names, nil
 }
 
 // validateRelate checks the relation kinds of Item.Relate, applies the default

@@ -90,13 +90,15 @@ func TestFormatSaved(t *testing.T) {
 			Title: "T",
 			Topics: []topic.Resolution{{
 				Topic: topic.Topic{ID: 1, Slug: "entrenamiento"}, Requested: "gym", Equivalent: true,
+			}, {
+				Topic: topic.Topic{ID: 2, Slug: "itv"}, Requested: "itv", Created: true,
 			}},
 			Pending:    true,
 			Superseded: []int64{45},
 		},
 		{ID: 45, Title: "Igual", Duplicate: true},
 	})
-	want := "#123 guardado · temas: entrenamiento (gym→entrenamiento) · embedding y parecidos pendientes (se calculan en segundo plano) · sustituye #45\n" +
+	want := "#123 guardado · etiquetas: #gym→#entrenamiento, #itv (nueva) · embedding y parecidos pendientes (se calculan en segundo plano) · sustituye #45\n" +
 		"#45 ya existía (duplicado): «Igual»"
 	if got != want {
 		t.Errorf("formatSaved =\n%s\nquería\n%s", got, want)
@@ -121,7 +123,7 @@ func TestFormatFull(t *testing.T) {
 	})
 	want := strings.Join([]string{
 		"#123 [decisión · vigente · 2026-09-28] Título",
-		"temas: a, b · clave: x",
+		"etiquetas: #a, #b · clave: x",
 		"contenido",
 		"relaciones: sustituye a #45 «t» (confirmada); relacionado con #7 «u» (sugerida); sustituido por #9 «v» (confirmada)",
 	}, "\n")

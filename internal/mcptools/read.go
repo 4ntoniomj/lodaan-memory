@@ -122,7 +122,7 @@ func label(m map[string]string, key string) string {
 // formatFull renders one record, omitting empty lines:
 //
 //	#123 [decisión · vigente · 2026-09-28] Título
-//	temas: a, b · clave: x
+//	etiquetas: #a, #b · clave: x
 //	<contenido>
 //	relaciones: sustituye a #45 «t» (confirmada); sustituido por #9 «u» (confirmada)
 func formatFull(f memory.Full) string {
@@ -133,7 +133,7 @@ func formatFull(f memory.Full) string {
 
 	var meta []string
 	if len(f.Topics) > 0 {
-		meta = append(meta, "temas: "+strings.Join(f.Topics, ", "))
+		meta = append(meta, "etiquetas: #"+strings.Join(f.Topics, ", #"))
 	}
 	if f.Key != "" {
 		meta = append(meta, "clave: "+f.Key)

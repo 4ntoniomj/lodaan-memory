@@ -132,6 +132,8 @@ type Item struct {
 	OccurredAt time.Time
 	// SupersededBy is the id of the record that replaced this one (0 if none or not superseded).
 	SupersededBy int64
+	// Tags are the slugs of the record's tags, sorted.
+	Tags []string
 }
 
 // Result is the answer to a Request.
@@ -491,7 +493,44 @@ func (s *Service) topicItems(ctx context.Context, topicID int32, sql string, lim
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo leer la ficha del tema: %w", err)
 	}
-	return scanItems(rows)
+	items, err := scanItems(rows)
+	if err != nil {
+		return nil, err
+	}
+	return items, s.attachTags(ctx, items)
+}
+
+// attachTags fills the Tags of items with one query.
+func (s *Service) attachTags(ctx context.Context, items []Item) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	rows, err := s.pool.Query(ctx, `SELECT mt.memory_id, t.slug FROM memory_topics mt
+		JOIN topics t ON t.id = mt.topic_id WHERE mt.memory_id = ANY($1) ORDER BY mt.memory_id, t.slug`, ids)
+	if err != nil {
+		return fmt.Errorf("no se pudieron leer las etiquetas: %w", err)
+	}
+	defer rows.Close()
+	tags := make(map[int64][]string, len(items))
+	for rows.Next() {
+		var id int64
+		var slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			return fmt.Errorf("no se pudo leer una etiqueta: %w", err)
+		}
+		tags[id] = append(tags[id], slug)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("no se pudieron leer las etiquetas: %w", err)
+	}
+	for i := range items {
+		items[i].Tags = tags[items[i].ID]
+	}
+	return nil
 }
 
 // voteTopic picks a topic from the best results. It looks at the first voteSize
@@ -681,6 +720,9 @@ func (s *Service) details(ctx context.Context, ids []int64) ([]Item, error) {
 	}
 	items, err := scanItems(rows)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.attachTags(ctx, items); err != nil {
 		return nil, err
 	}
 	byID := make(map[int64]Item, len(items))

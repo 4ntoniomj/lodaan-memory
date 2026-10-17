@@ -103,7 +103,7 @@ func (r Result) lines() []string {
 	return out
 }
 
-// line renders one item as "#id [tipo fecha, estado] título — fragmento".
+// line renders one item as "#id [tipo fecha, estado] título · #a #b — fragmento".
 func (it Item) line() string {
 	label, ok := kindLabels[it.Kind]
 	if !ok {
@@ -123,6 +123,9 @@ func (it Item) line() string {
 		label += ", invalidado"
 	}
 	s := fmt.Sprintf("#%d [%s] %s", it.ID, label, oneLine(it.Title))
+	if len(it.Tags) > 0 {
+		s += " · #" + strings.Join(it.Tags, " #")
+	}
 	if snip := oneLine(it.Snippet); snip != "" {
 		s += " — " + snip
 	}
