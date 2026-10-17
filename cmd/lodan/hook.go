@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -106,8 +107,9 @@ func runHookCommand(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// sessionStartPull returns the pull run when a session starts, or nil when sync is not
-// configured or the database is unavailable.
+// sessionStartPull returns what runs when a session starts: `lodan sync pull` started as a
+// separate background process, so the client never waits for the network. It is nil when
+// sync is not configured or the database is unavailable (the pull would start PostgreSQL).
 func sessionStartPull(deps *hook.Deps, stderr io.Writer) func(context.Context) error {
 	if deps == nil {
 		return nil
@@ -116,16 +118,19 @@ func sessionStartPull(deps *hook.Deps, stderr io.Writer) func(context.Context) e
 	if err != nil {
 		return nil
 	}
-	c, ok, err := gitsync.FromConfig(cfg)
-	if err != nil || !ok {
+	if _, ok, err := gitsync.FromConfig(cfg); err != nil || !ok {
 		return nil
 	}
-	return func(ctx context.Context) error {
-		res, err := gitsync.Pull(ctx, deps.Pool, c)
-		for _, e := range res.Errors {
-			fmt.Fprintln(stderr, e)
+	return func(context.Context) error {
+		bin, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("no se pudo localizar el binario: %w", err)
 		}
-		return err
+		cmd := exec.Command(bin, "sync", "pull")
+		if err := startDetached(cmd); err != nil {
+			return fmt.Errorf("no se pudo lanzar lodan sync pull: %w", err)
+		}
+		return cmd.Process.Release()
 	}
 }
 

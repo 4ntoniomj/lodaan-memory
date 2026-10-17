@@ -60,8 +60,26 @@ func Init(ctx context.Context, c Config) (InitResult, error) {
 }
 
 // Push exports the local changes, commits them and pushes them to the remote. Remote changes
-// are integrated first, so machines can push in any order.
-func Push(ctx context.Context, pool *pgxpool.Pool, c Config) (ExportResult, error) {
+// are integrated first, so machines can push in any order. It holds LockKey while it runs.
+func Push(ctx context.Context, pool *pgxpool.Pool, c Config) (res ExportResult, err error) {
+	err = withSyncLock(ctx, pool, func() error {
+		res, err = push(ctx, pool, c)
+		return err
+	})
+	return res, err
+}
+
+// Pull brings the remote changes and imports the files of the other machines. It holds
+// LockKey while it runs.
+func Pull(ctx context.Context, pool *pgxpool.Pool, c Config) (res ImportResult, err error) {
+	err = withSyncLock(ctx, pool, func() error {
+		res, err = pull(ctx, pool, c)
+		return err
+	})
+	return res, err
+}
+
+func push(ctx context.Context, pool *pgxpool.Pool, c Config) (ExportResult, error) {
 	id, err := ready(c)
 	if err != nil {
 		return ExportResult{}, err
@@ -110,8 +128,7 @@ func Push(ctx context.Context, pool *pgxpool.Pool, c Config) (ExportResult, erro
 	return res, nil
 }
 
-// Pull brings the remote changes and imports the files of the other machines.
-func Pull(ctx context.Context, pool *pgxpool.Pool, c Config) (ImportResult, error) {
+func pull(ctx context.Context, pool *pgxpool.Pool, c Config) (ImportResult, error) {
 	id, err := ready(c)
 	if err != nil {
 		return ImportResult{}, err

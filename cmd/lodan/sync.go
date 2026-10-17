@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -34,6 +35,9 @@ const syncUsage = `Uso:
 
 // defaultSyncEvery is the default interval of `lodan sync schedule`, in minutes.
 const defaultSyncEvery = 15
+
+// syncTimeout bounds `lodan sync push|pull|run`.
+const syncTimeout = 10 * time.Minute
 
 // runSync implements `lodan sync init|push|pull|run|schedule|unschedule`.
 func runSync(args []string, stdout, stderr io.Writer) int {
@@ -131,7 +135,10 @@ func runSyncTransfer(action string, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 
-	ctx, cancel := signalContext()
+	sigCtx, stop := signalContext()
+	defer stop()
+	// A sync never runs forever (the scheduled task would stop starting new runs).
+	ctx, cancel := context.WithTimeout(sigCtx, syncTimeout)
 	defer cancel()
 	logger := log.New(stderr, "", 0)
 	deps, closeStack, err := openStack(ctx, cfg, logger)
