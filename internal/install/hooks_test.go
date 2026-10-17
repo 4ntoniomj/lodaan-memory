@@ -376,11 +376,18 @@ func TestHooksAntigravityGrupo(t *testing.T) {
 		t.Errorf("files = %v, falta hooks.json", files)
 	}
 	got := hkJSON(t, e.path(".gemini/config/hooks.json"))
-	wantLodan := map[string]any{"SessionStart": []any{map[string]any{
-		"command": `"C:/x/lodan.exe" hook compact --client antigravity-client --format antigravity`,
-		"timeout": float64(15),
-		"type":    "command",
-	}}}
+	wantLodan := map[string]any{"SessionStart": []any{
+		map[string]any{
+			"command": `"C:/x/lodan.exe" hook compact --client antigravity-client --format antigravity`,
+			"timeout": float64(15),
+			"type":    "command",
+		},
+		map[string]any{
+			"command": `"C:/x/lodan.exe" hook session-start --client antigravity-client --format antigravity`,
+			"timeout": float64(15),
+			"type":    "command",
+		},
+	}}
 	if !reflect.DeepEqual(got["lodan"], wantLodan) {
 		t.Errorf("grupo lodan = %v, quería %v", got["lodan"], wantLodan)
 	}

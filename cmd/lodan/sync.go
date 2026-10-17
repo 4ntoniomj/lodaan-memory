@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"runtime"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"lodan/internal/config"
 	"lodan/internal/gitsync"
+	"lodan/internal/install"
 )
 
 const syncUsage = `Uso:
@@ -16,9 +22,20 @@ const syncUsage = `Uso:
       Exporta los cambios locales cifrados, los confirma y los sube al repositorio.
   lodan sync pull
       Baja los cambios de las otras máquinas y los importa.
+  lodan sync run
+      Hace push y después pull (lo que ejecuta la tarea programada).
+  lodan sync schedule [--every <minutos>]
+      Crea una tarea de tu usuario que ejecuta "lodan sync run" cada <minutos> (por defecto 15;
+      de 5 a 1440): Programador de tareas en Windows, timer de systemd --user en Linux y
+      LaunchAgent en macOS. Usa tus credenciales de git.
+  lodan sync unschedule
+      Quita esa tarea.
 `
 
-// runSync implements `lodan sync init|push|pull`.
+// defaultSyncEvery is the default interval of `lodan sync schedule`, in minutes.
+const defaultSyncEvery = 15
+
+// runSync implements `lodan sync init|push|pull|run|schedule|unschedule`.
 func runSync(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, syncUsage)
@@ -30,8 +47,10 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "init":
 		return runSyncInit(args[1:], stdout, stderr)
-	case "push", "pull":
+	case "push", "pull", "run":
 		return runSyncTransfer(args[0], args[1:], stdout, stderr)
+	case "schedule", "unschedule":
+		return runSyncSchedule(args[0], args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "lodan sync: acción desconocida %q\n\n", args[0])
 		fmt.Fprint(stderr, syncUsage)
@@ -122,22 +141,37 @@ func runSyncTransfer(action string, args []string, stdout, stderr io.Writer) int
 	}
 	defer closeStack()
 
-	if action == "push" {
-		res, err := gitsync.Push(ctx, deps.Pool, c)
-		if err != nil {
-			fmt.Fprintf(stderr, "lodan sync push: %v\n", err)
-			return 1
+	switch action {
+	case "push":
+		return syncPush(ctx, deps.Pool, c, stdout, stderr)
+	case "pull":
+		return syncPull(ctx, deps.Pool, c, stdout, stderr)
+	default: // run: push first, so local edits are sent before merging remote ones
+		code := syncPush(ctx, deps.Pool, c, stdout, stderr)
+		if pc := syncPull(ctx, deps.Pool, c, stdout, stderr); pc != 0 {
+			code = pc
 		}
-		if res.File == "" {
-			fmt.Fprintln(stdout, "Sin cambios que exportar.")
-		} else {
-			fmt.Fprintf(stdout, "Enviado %s: %d registros, %d relaciones, %d sesiones, %d borrados.\n",
-				res.File, res.Memories, res.Relations, res.Sessions, res.Deletions)
-		}
-		return 0
+		return code
 	}
+}
 
-	res, err := gitsync.Pull(ctx, deps.Pool, c)
+func syncPush(ctx context.Context, pool *pgxpool.Pool, c gitsync.Config, stdout, stderr io.Writer) int {
+	res, err := gitsync.Push(ctx, pool, c)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan sync push: %v\n", err)
+		return 1
+	}
+	if res.File == "" {
+		fmt.Fprintln(stdout, "Sin cambios que exportar.")
+	} else {
+		fmt.Fprintf(stdout, "Enviado %s: %d registros, %d relaciones, %d sesiones, %d borrados.\n",
+			res.File, res.Memories, res.Relations, res.Sessions, res.Deletions)
+	}
+	return 0
+}
+
+func syncPull(ctx context.Context, pool *pgxpool.Pool, c gitsync.Config, stdout, stderr io.Writer) int {
+	res, err := gitsync.Pull(ctx, pool, c)
 	if err != nil {
 		fmt.Fprintf(stderr, "lodan sync pull: %v\n", err)
 		return 1
@@ -153,4 +187,79 @@ func runSyncTransfer(action string, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	return 0
+}
+
+// runSyncSchedule implements `lodan sync schedule|unschedule`: a task of the current user, so
+// it runs with the user's git credentials.
+func runSyncSchedule(action string, args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("sync "+action, "lodan sync "+action, stderr)
+	every := defaultSyncEvery
+	if action == "schedule" {
+		fs.IntVar(&every, "every", defaultSyncEvery, "minutos entre sincronizaciones (de 5 a 1440)")
+	}
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if every < 5 || every > 1440 {
+		fmt.Fprintln(stderr, "lodan sync schedule: el intervalo debe estar entre 5 y 1440 minutos")
+		return 2
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan sync %s: %v\n", action, err)
+		return 1
+	}
+	if _, ok, err := gitsync.FromConfig(cfg); err != nil {
+		fmt.Fprintf(stderr, "lodan sync %s: %v\n", action, err)
+		return 1
+	} else if !ok {
+		fmt.Fprintln(stderr, gitsync.ErrNotConfigured)
+		return 1
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan sync %s: no se pudo localizar el binario: %v\n", action, err)
+		return 1
+	}
+	if stable := install.StableBinary(cfg.DataDir, runtime.GOOS); fileExistsCLI(stable) {
+		bin = stable // the installed copy survives updates of the downloaded one
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan sync %s: %v\n", action, err)
+		return 1
+	}
+	s := gitsync.Scheduler{GOOS: runtime.GOOS, Home: home, Bin: bin}
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	if action == "unschedule" {
+		if err := s.Unschedule(ctx); err != nil {
+			fmt.Fprintf(stderr, "lodan sync unschedule: %v\n", err)
+			return 1
+		}
+		cfg.SyncIntervalMinutes = 0
+		if err := cfg.Save(); err != nil {
+			fmt.Fprintf(stderr, "lodan sync unschedule: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Sincronización automática quitada.")
+		return 0
+	}
+	if err := s.Schedule(ctx, every); err != nil {
+		fmt.Fprintf(stderr, "lodan sync schedule: %v\n", err)
+		return 1
+	}
+	cfg.SyncIntervalMinutes = every
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(stderr, "lodan sync schedule: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Sincronización automática cada %d minutos (tarea %s de tu usuario).\n", every, gitsync.TaskName)
+	return 0
+}
+
+func fileExistsCLI(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

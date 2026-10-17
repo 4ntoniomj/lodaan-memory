@@ -3,7 +3,7 @@
 ## Resumen
 
 **Problema**: llevar la memoria de una máquina a las demás sin perder ni duplicar nada y sin que en el repositorio se lea nada.
-**Objetivo**: `lodan sync init|push|pull` y la sincronización periódica del servicio: ficheros por lotes cifrados con age en `changes/<máquina>/` de un repositorio git (especificación: `odd/tasks/sincronizacion-git-y-hooks.md`, S1-S9).
+**Objetivo**: `lodan sync init|push|pull|run|schedule|unschedule` (la tarea periódica es del usuario, no del servicio): ficheros por lotes cifrados con age en `changes/<máquina>/` de un repositorio git (especificación: `odd/tasks/sincronizacion-git-y-hooks.md`, S1-S9).
 **Alcance**: dentro: exportar, importar, reglas de fusión, git y la clave. Fuera: el esquema (migración `0003_sync.sql` en `database`) y la CLI (`cmd/lodan/sync.go`).
 
 ## Piezas

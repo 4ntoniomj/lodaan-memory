@@ -122,6 +122,23 @@ func LastSessionLine(ctx context.Context, deps *Deps, client string) (string, er
 		strings.ReplaceAll(summary, "\n", " ")), nil
 }
 
+// SessionStart brings the other machines' changes when a session starts. pull is nil when
+// sync is not configured. With format "antigravity" it writes the empty JSON object that
+// Antigravity expects; with "text" it writes nothing. A pull error is returned after the
+// output is written, so the client always gets a valid answer.
+func SessionStart(ctx context.Context, pull func(context.Context) error, format string, out io.Writer) error {
+	var err error
+	if pull != nil {
+		err = pull(ctx)
+	}
+	if format == "antigravity" {
+		if _, werr := fmt.Fprintln(out, "{}"); werr != nil && err == nil {
+			err = werr
+		}
+	}
+	return err
+}
+
 // storeSummary saves the compaction summary in the client's most recently active open
 // session, without closing it; with no open session it creates an ended one.
 func storeSummary(ctx context.Context, pool *pgxpool.Pool, client, summary string) error {

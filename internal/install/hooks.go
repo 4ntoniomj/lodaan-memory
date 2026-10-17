@@ -16,6 +16,7 @@ const (
 	hookTimeout        = 15 // seconds the client waits for a lodan hook
 	hookCompactMark    = " hook compact --client "
 	hookSubagentMark   = " hook subagent-stop --client "
+	hookSessionMark    = " hook session-start --client "
 	opencodePluginHead = "// installed by lodan"
 	antigravityGroup   = "lodan"
 )
@@ -35,7 +36,8 @@ func hookCommand(bin, action, client string, extra ...string) string {
 }
 
 func isLodanHookCommand(cmd string) bool {
-	return strings.Contains(cmd, hookCompactMark) || strings.Contains(cmd, hookSubagentMark)
+	return strings.Contains(cmd, hookCompactMark) || strings.Contains(cmd, hookSubagentMark) ||
+		strings.Contains(cmd, hookSessionMark)
 }
 
 func claudeSettingsPath(env Env) string { return homePath(env, ".claude", "settings.json") }
@@ -113,7 +115,9 @@ func claudeHandler(cmd string) map[string]any {
 func claudeGroups(bin string) [][2]any {
 	compact := hookCommand(bin, "compact", "claude-code")
 	stop := hookCommand(bin, "subagent-stop", "claude-code")
+	start := hookCommand(bin, "session-start", "claude-code")
 	return [][2]any{
+		{"SessionStart", map[string]any{"matcher": "startup|resume|clear", "hooks": []any{claudeHandler(start)}}},
 		{"SessionStart", map[string]any{"matcher": "compact", "hooks": []any{claudeHandler(compact)}}},
 		{"PostCompact", map[string]any{"matcher": "", "hooks": []any{claudeHandler(compact)}}},
 		{"SubagentStop", map[string]any{"matcher": "", "hooks": []any{claudeHandler(stop)}}},
@@ -207,12 +211,14 @@ func claudeHooksTransform(text, bin string, remove bool) (string, error) {
 // antigravityGroupValue is lodan's group in Antigravity's hooks.json. Antigravity only has
 // SessionStart for this: no compaction or subagent events exist there.
 func antigravityGroupValue(bin string) map[string]any {
+	handler := func(cmd string) map[string]any {
+		return map[string]any{"command": cmd, "timeout": json.Number(fmt.Sprint(hookTimeout)), "type": "command"}
+	}
 	return map[string]any{
-		"SessionStart": []any{map[string]any{
-			"command": hookCommand(bin, "compact", "antigravity-client", "--format", "antigravity"),
-			"timeout": json.Number(fmt.Sprint(hookTimeout)),
-			"type":    "command",
-		}},
+		"SessionStart": []any{
+			handler(hookCommand(bin, "compact", "antigravity-client", "--format", "antigravity")),
+			handler(hookCommand(bin, "session-start", "antigravity-client", "--format", "antigravity")),
+		},
 	}
 }
 
@@ -381,6 +387,9 @@ export default {
               await ctx.session.synthetic({ sessionID: d.sessionID, text, description: "lodan", resume: false });
             } catch {}
           }
+        } else if (ev?.type === "session.created") {
+          // A new session brings the other machines' changes (lodan sync pull) first.
+          runLodan("session-start", { hook_event_name: "SessionStart", source: "startup", cwd });
         } else if (ev?.type === "session.synthetic") {
           // A subagent that ran in the background reports to its parent this way.
           if (typeof d.text === "string" && d.text.startsWith("<subagent ")) subagentStop(d.text);

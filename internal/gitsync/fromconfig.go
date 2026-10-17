@@ -1,15 +1,10 @@
 package gitsync
 
 import (
-	"context"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"lodan/internal/config"
 )
@@ -49,39 +44,6 @@ func DefaultMachineID() string {
 		id = "maquina"
 	}
 	return id
-}
-
-// RunPeriodic pushes and then pulls every interval until ctx is cancelled. Failures are
-// logged and never stop the caller.
-func RunPeriodic(ctx context.Context, pool *pgxpool.Pool, c Config, interval time.Duration, logger *log.Logger) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		if res, err := Push(ctx, pool, c); err != nil {
-			logger.Printf("sincronización: no se pudo enviar: %v", err)
-		} else if res.File != "" {
-			logger.Printf("sincronización: enviado %s", res.File)
-		}
-		res, err := Pull(ctx, pool, c)
-		if err != nil {
-			logger.Printf("sincronización: no se pudo recibir: %v", err)
-			continue
-		}
-		for _, e := range res.Errors {
-			logger.Printf("sincronización: %s", e)
-		}
-		for _, k := range res.Contradictions {
-			logger.Printf("sincronización: %s", k)
-		}
-		if res.Files > 0 {
-			logger.Printf("sincronización: importados %d ficheros", res.Files)
-		}
-	}
 }
 
 // String is the line shown to the user for a contradiction found while importing.

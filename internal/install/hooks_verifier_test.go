@@ -91,8 +91,12 @@ func TestProbeHooksInstallKeepsUserHooks(t *testing.T) {
 				}
 			}
 		}
-		if cnt != 1 {
-			t.Errorf("%s has %d lodan handlers", ev, cnt)
+		want := 1
+		if ev == "SessionStart" {
+			want = 2 // session-start (startup|resume|clear) + compact
+		}
+		if cnt != want {
+			t.Errorf("%s has %d lodan handlers, want %d", ev, cnt, want)
 		}
 	}
 	if _, err := os.Stat(claude + ".bak-lodan"); err != nil {

@@ -13,6 +13,7 @@ import (
 	"lodan/internal/config"
 	"lodan/internal/database"
 	"lodan/internal/embedding"
+	"lodan/internal/gitsync"
 	"lodan/internal/hook"
 	"lodan/internal/memory"
 	"lodan/internal/session"
@@ -28,12 +29,19 @@ const hookUsage = `Uso:
       con el evento PostCompact guarda el resumen de la compactación en la sesión del cliente.
   lodan hook subagent-stop --client <nombre>
       Al terminar un subagente: guarda cada punto de su bloque "## Key Learnings" como nota.
+  lodan hook session-start --client <nombre> [--format text|antigravity]
+      Al empezar una sesión: si la sincronización está configurada, trae los cambios de las
+      otras máquinas (lodan sync pull).
 
 Leen el JSON del evento por la entrada estándar, nunca arrancan PostgreSQL y siempre salen con 0.
 `
 
-// hookTimeout bounds a whole hook run, so a hook never holds up the client.
-const hookTimeout = 8 * time.Second
+// hookTimeout bounds a whole hook run, so a hook never holds up the client. session-start
+// gets more because it talks to the git remote.
+const (
+	hookTimeout             = 8 * time.Second
+	hookSessionStartTimeout = 12 * time.Second
+)
 
 // runHookCommand implements `lodan hook compact|subagent-stop`. Apart from a wrong command line it
 // always returns 0: a hook must never block or break the AI client.
@@ -47,7 +55,7 @@ func runHookCommand(args []string, stdout, stderr io.Writer) int {
 	case "-h", "--help", "-help", "help":
 		fmt.Fprint(stdout, hookUsage)
 		return 0
-	case "compact", "subagent-stop":
+	case "compact", "subagent-stop", "session-start":
 	default:
 		fmt.Fprintf(stderr, "lodan hook: acción desconocida %q\n\n", action)
 		fmt.Fprint(stderr, hookUsage)
@@ -56,21 +64,25 @@ func runHookCommand(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("hook "+action, "lodan hook "+action+" --client <nombre>", stderr)
 	client := fs.String("client", "desconocido", "nombre del cliente de IA (el mismo que usa en MCP)")
 	format := "text"
-	if action == "compact" {
+	if action == "compact" || action == "session-start" {
 		fs.StringVar(&format, "format", "text", "salida: text, o antigravity (JSON injectSteps del SessionStart de Antigravity)")
 	}
 	if code, done := parseFlags(fs, args[1:]); done {
 		return code
 	}
 	if format != "text" && format != "antigravity" {
-		fmt.Fprintf(stderr, "lodan hook compact: formato desconocido %q (usa text o antigravity)\n", format)
+		fmt.Fprintf(stderr, "lodan hook "+action+": formato desconocido %q (usa text o antigravity)\n", format)
 		return 2
 	}
 
 	// The event is read first, so the client is never left waiting on a full pipe.
 	input, _ := io.ReadAll(io.LimitReader(stdin, 16<<20))
 
-	ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	timeout := hookTimeout
+	if action == "session-start" {
+		timeout = hookSessionStartTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	deps, closeDeps := connectHook(ctx, stderr)
 	defer closeDeps()
@@ -86,8 +98,35 @@ func runHookCommand(args []string, stdout, stderr io.Writer) int {
 		if _, err := hook.SubagentStop(ctx, deps, *client, bytes.NewReader(input)); err != nil {
 			fmt.Fprintf(stderr, "lodan hook subagent-stop: %v\n", err)
 		}
+	case action == "session-start":
+		if err := hook.SessionStart(ctx, sessionStartPull(deps, stderr), format, stdout); err != nil {
+			fmt.Fprintf(stderr, "lodan hook session-start: %v\n", err)
+		}
 	}
 	return 0
+}
+
+// sessionStartPull returns the pull run when a session starts, or nil when sync is not
+// configured or the database is unavailable.
+func sessionStartPull(deps *hook.Deps, stderr io.Writer) func(context.Context) error {
+	if deps == nil {
+		return nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return nil
+	}
+	c, ok, err := gitsync.FromConfig(cfg)
+	if err != nil || !ok {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		res, err := gitsync.Pull(ctx, deps.Pool, c)
+		for _, e := range res.Errors {
+			fmt.Fprintln(stderr, e)
+		}
+		return err
+	}
 }
 
 // writeAntigravityStart prints the JSON Antigravity expects from a SessionStart hook: the

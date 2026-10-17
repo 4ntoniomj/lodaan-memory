@@ -196,7 +196,7 @@ lodan lee `config.json` de la carpeta de datos; las variables de entorno `LODAN_
 | Dirección HTTP de `serve --http` | `127.0.0.1:7438` | `LODAN_HTTP_ADDR` |
 | Tope de una respuesta de `recall` | 6000 bytes | `LODAN_RECALL_MAX_BYTES` |
 | Minutos de inactividad que cierran una sesión | 30 | `LODAN_SESSION_IDLE_MINUTES` |
-| Minutos entre sincronizaciones automáticas del servicio (`sync_interval_minutes`; 0 = desactivada) | 0 | `LODAN_SYNC_INTERVAL_MINUTES` |
+| Minutos entre sincronizaciones de la tarea de `lodan sync schedule` (`sync_interval_minutes`; 0 = sin tarea) | 0 | `LODAN_SYNC_INTERVAL_MINUTES` |
 
 El resto de ajustes (carpeta de binarios de PostgreSQL, umbrales de duplicados y de temas, tiempos del embedding) están en [`internal/config/config.go`](internal/config/config.go).
 
@@ -216,7 +216,7 @@ Todos los subcomandos aceptan `-h` para mostrar sus opciones (`lodan <subcomando
 | `doctor` | Diagnostica la instalación, con una línea por comprobación | `./lodan doctor` |
 | `uninstall` | Desinstala lodan; los datos se conservan salvo con `--purge`. Opciones: `--yes`, `--dry-run`, `--purge` | `./lodan uninstall --purge` |
 | `service` | Gestiona el servicio de sistema: `start`, `stop`, `restart`, `enable`, `disable`, `status` (cada uno con `--name`, por defecto `lodan`) | `./lodan service status` |
-| `sync` | Sincroniza la memoria con otras máquinas por git, cifrada: `init --repo <url> [--key <fichero>] [--machine <id>]`, `push`, `pull` | `./lodan sync pull` |
+| `sync` | Sincroniza la memoria con otras máquinas por git, cifrada: `init --repo <url> [--key <fichero>] [--machine <id>]`, `push`, `pull`, `run`, `schedule [--every <minutos>]`, `unschedule` | `./lodan sync pull` |
 | `hook` | Hooks de los clientes de IA: `compact`, `subagent-stop` (con `--client <nombre>`; leen el evento por la entrada estándar y siempre salen con 0) | `./lodan hook compact --client claude-code` |
 | `bench` | Ejecuta el benchmark sobre la base `lodan_bench`. Opciones: `--rows`, `--candidates`, `--reuse`, `--queries`, `--out`, `--seed`, `--embed-queries` | `./lodan bench --rows 10000,100000` |
 
@@ -344,7 +344,9 @@ lodan sync push
 
 - `lodan sync push`: envía los cambios locales.
 - `lodan sync pull`: trae e importa los cambios de las otras máquinas y muestra las contradicciones que tienes que resolver.
-- Con `"sync_interval_minutes": 15` en `config.json` (o `LODAN_SYNC_INTERVAL_MINUTES`), el servicio hace `push` y `pull` cada 15 minutos; los fallos quedan en el log del servicio y no lo paran. El servicio necesita acceso a las credenciales de git del usuario.
+- `lodan sync run`: `push` y después `pull`.
+- `lodan sync schedule [--every 15]`: crea una tarea **de tu usuario** que ejecuta `lodan sync run` cada 15 minutos (de 5 a 1440) con tus credenciales de git, y guarda el intervalo en `sync_interval_minutes`. En Windows es la tarea `lodan-sync` del Programador de tareas (solo con la sesión iniciada, sin administrador, sin ventana gracias a `conhost.exe --headless`); en Linux, el timer `lodan-sync.timer` de `systemd --user`; en macOS, el LaunchAgent `com.lodan.sync`. `lodan sync unschedule` la quita. No la hace el servicio de lodan porque corre con otra cuenta (LocalSystem o root), que no tiene tus credenciales de git.
+- Además, al empezar cada sesión de IA el hook `lodan hook session-start` hace un `pull` (ver [Hooks](#hooks-de-los-clientes-de-ia)).
 
 ---
 
@@ -356,6 +358,7 @@ Automatismos que no dependen de la disciplina de la IA. Los ejecuta el cliente e
 | :--- | :--- | :--- |
 | `lodan hook compact --client <nombre>` | Justo después de compactar el contexto | Escribe las instrucciones de recuperación (llamar a `recall` en lote con los temas en curso) y el resumen de la última sesión de lodan de ese cliente |
 | `lodan hook compact --client <nombre>` | `PostCompact` (con `compact_summary`) | Guarda el resumen de la compactación en la sesión abierta del cliente, sin cerrarla |
+| `lodan hook session-start --client <nombre>` | Al empezar una sesión | Si la sincronización está configurada, trae los cambios de las otras máquinas (`lodan sync pull`) |
 | `lodan hook subagent-stop --client <nombre>` | Fin de un subagente | Guarda cada punto del bloque `## Key Learnings` de su informe (máximo 5) como `note` en el tema del proyecto (la carpeta raíz del repositorio git). Descarta lo que parezca un secreto o un DNI/NIE |
 
 `--client` debe ser el nombre con el que el cliente se presenta por MCP (`claude-code`, `opencode`, `antigravity-client`), para que el resumen sea el de sus sesiones.
@@ -364,9 +367,9 @@ Automatismos que no dependen de la disciplina de la IA. Los ejecuta el cliente e
 
 | Cliente | Dónde | Qué se registra | Qué no se puede |
 | :--- | :--- | :--- | :--- |
-| Claude Code | `~/.claude/settings.json` | `SessionStart` (matcher `compact`) y `PostCompact` → `hook compact`; `SubagentStop` y `PostToolUse` sobre `SubagentHandback` → `hook subagent-stop` | — |
-| opencode 2.x | `~/.config/opencode/plugins/lodan.js` | Plugin v2: al terminar una compactación guarda el resumen e inyecta las instrucciones; al terminar un subagente (herramienta `subagent`, también en segundo plano) guarda sus Key Learnings | Si el proveedor compacta por su cuenta (compactación nativa), no hay resumen que guardar |
-| Antigravity | `~/.gemini/config/hooks.json` (grupo `lodan`) | `SessionStart` → `hook compact --format antigravity`: al empezar una conversación inyecta las instrucciones y el resumen de la última sesión | Antigravity no tiene evento de compactación ni de fin de subagente: no se simulan |
+| Claude Code | `~/.claude/settings.json` | `SessionStart` (matcher `startup\|resume\|clear`) → `hook session-start`; `SessionStart` (matcher `compact`) y `PostCompact` → `hook compact`; `SubagentStop` y `PostToolUse` sobre `SubagentHandback` → `hook subagent-stop` | — |
+| opencode 2.x | `~/.config/opencode/plugins/lodan.js` | Plugin v2: al crear una sesión hace `hook session-start`; al terminar una compactación guarda el resumen e inyecta las instrucciones; al terminar un subagente (herramienta `subagent`, también en segundo plano) guarda sus Key Learnings | Si el proveedor compacta por su cuenta (compactación nativa), no hay resumen que guardar |
+| Antigravity | `~/.gemini/config/hooks.json` (grupo `lodan`) | `SessionStart` → `hook compact --format antigravity` (al empezar una conversación inyecta las instrucciones y el resumen de la última sesión) y `hook session-start --format antigravity` (pull) | Antigravity no tiene evento de compactación ni de fin de subagente: no se simulan |
 
 ---
 
