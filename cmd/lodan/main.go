@@ -28,8 +28,8 @@ Subcomandos:
   uninstall Desinstala lodan (los datos se conservan salvo con --purge)
   service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
   bench     Ejecuta el benchmark (--rows, --out)
-  hook      Hooks de los clientes de IA: compact | subagent-stop (siempre salen con 0)
-  sync      Sincroniza la memoria con otras máquinas por git, cifrada: init | push | pull
+  hook      Hooks de los clientes de IA: compact | subagent-stop | session-start (siempre salen con 0)
+  sync      Sincroniza la memoria con otras máquinas por git, cifrada: init | push | pull | run | schedule | unschedule
 
 Copias de seguridad (paran PostgreSQL solo mientras se copian los datos; la compresión
 se hace con PostgreSQL ya en marcha y el destino necesita espacio libre para esa copia):
