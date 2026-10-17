@@ -367,7 +367,7 @@ func (a *applier) mergeMemory(ctx context.Context, l *local, in memoryLine) erro
 		// Both machines edited the record without seeing each other's edit: the most recent
 		// wins and the other version stays as a superseded copy.
 		if newer(in.UpdatedAt, in.Rev, l.updated, l.rev) {
-			copyID, err := a.insertCopy(ctx, l.title, l.content, l.kind, l.sessionID, l.occurred, l.created, l.updated, l.id)
+			copyID, err := a.insertCopy(ctx, l.syncID, l.rev, l.title, l.content, l.kind, l.sessionID, l.occurred, l.created, l.updated, l.id)
 			if err != nil {
 				return err
 			}
@@ -384,7 +384,7 @@ func (a *applier) mergeMemory(ctx context.Context, l *local, in memoryLine) erro
 			}
 			return nil
 		}
-		copyID, err := a.insertCopy(ctx, in.Title, in.Content, in.Kind, in.SessionID, in.OccurredAt, in.CreatedAt, in.UpdatedAt, l.id)
+		copyID, err := a.insertCopy(ctx, l.syncID, in.Rev, in.Title, in.Content, in.Kind, in.SessionID, in.OccurredAt, in.CreatedAt, in.UpdatedAt, l.id)
 		if err != nil {
 			return err
 		}
@@ -483,16 +483,25 @@ func (a *applier) syncTopicsActive(ctx context.Context, id int64, status string)
 }
 
 // insertCopy keeps a losing version as a superseded record with the topics of the record.
-func (a *applier) insertCopy(ctx context.Context, title, content, kind, sessionID string, occurred, created, updated time.Time, of int64) (int64, error) {
+// Its sync_id is derived from the record and the losing version, so every machine that
+// resolves the same conflict creates the same copy, and later changes to it converge.
+func (a *applier) insertCopy(ctx context.Context, recordSyncID, losingRev, title, content, kind, sessionID string,
+	occurred, created, updated time.Time, of int64) (int64, error) {
 	sid, err := a.sessionOrNil(ctx, sessionID)
 	if err != nil {
 		return 0, err
 	}
 	var id int64
-	if err := a.tx.QueryRow(ctx, `INSERT INTO memories
-		(kind, status, title, content, content_hash, session_id, occurred_at, created_at, updated_at)
-		VALUES ($1::text::memory_kind, 'superseded', $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		kind, title, content, memory.ContentHash(content), sid, occurred, created, updated).Scan(&id); err != nil {
+	err = a.tx.QueryRow(ctx, `INSERT INTO memories
+		(sync_id, sync_rev, sync_base, kind, status, title, content, content_hash, session_id, occurred_at, created_at, updated_at)
+		VALUES (md5($9 || ':' || $10)::uuid, $10::uuid, $10::uuid, $1::text::memory_kind, 'superseded', $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (sync_id) DO NOTHING RETURNING id`,
+		kind, title, content, memory.ContentHash(content), sid, occurred, created, updated, recordSyncID, losingRev).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// This conflict was already resolved here (or the copy arrived from the other machine).
+		err = a.tx.QueryRow(ctx, `SELECT id FROM memories WHERE sync_id = md5($1 || ':' || $2)::uuid`, recordSyncID, losingRev).Scan(&id)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("no se pudo guardar la versión anterior: %w", err)
 	}
 	if _, err := a.tx.Exec(ctx, `INSERT INTO memory_topics (topic_id, memory_id, kind, active, ts)
