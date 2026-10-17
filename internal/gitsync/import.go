@@ -53,7 +53,12 @@ func Import(ctx context.Context, pool *pgxpool.Pool, opts ImportOptions) (Import
 		}
 		contradictions, err := applyFile(ctx, pool, f.rel, b)
 		if err != nil {
-			return res, fmt.Errorf("no se pudo importar %s: %w", f.rel, err)
+			if ctx.Err() != nil {
+				return res, fmt.Errorf("no se pudo importar %s: %w", f.rel, err)
+			}
+			// A file that cannot be applied must not block the others; it is retried next time.
+			res.Errors = append(res.Errors, "no se pudo importar "+f.rel+": "+err.Error())
+			continue
 		}
 		res.Files++
 		res.Contradictions = append(res.Contradictions, contradictions...)

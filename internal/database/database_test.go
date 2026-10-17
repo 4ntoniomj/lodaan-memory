@@ -198,8 +198,42 @@ func TestMigrate(t *testing.T) {
 	if err := tc.Pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 2 {
-		t.Errorf("schema_migrations tiene %d filas, se esperaban 2", applied)
+	if applied != 3 {
+		t.Errorf("schema_migrations tiene %d filas, se esperaban 3", applied)
+	}
+
+	// 0003: memories.sync_id es uuid NOT NULL con índice único.
+	var sync struct {
+		typ      string
+		nullable string
+	}
+	if err := tc.Pool.QueryRow(ctx, `SELECT data_type, is_nullable FROM information_schema.columns
+		WHERE table_name = 'memories' AND column_name = 'sync_id'`).Scan(&sync.typ, &sync.nullable); err != nil {
+		t.Fatalf("falta la columna memories.sync_id: %v", err)
+	}
+	if sync.typ != "uuid" || sync.nullable != "NO" {
+		t.Errorf("memories.sync_id es %s (nullable=%s), se esperaba uuid NOT NULL", sync.typ, sync.nullable)
+	}
+	var uniqueSyncID bool
+	if err := tc.Pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+		WHERE i.indrelid = 'memories'::regclass AND i.indisunique AND i.indnatts = 1 AND a.attname = 'sync_id')`).Scan(&uniqueSyncID); err != nil {
+		t.Fatal(err)
+	}
+	if !uniqueSyncID {
+		t.Error("memories.sync_id no tiene un índice único")
+	}
+	for _, name := range []string{
+		"sync_tombstones", "sync_aliases", "sync_imported_files", "sync_state", "sync_revs", "sync_pending_relations",
+	} {
+		var exists bool
+		if err := tc.Pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Errorf("falta la tabla %s", name)
+		}
 	}
 
 	// 0002 sustituye el índice de la ficha del tema por dos parciales.

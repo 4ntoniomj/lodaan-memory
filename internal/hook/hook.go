@@ -241,8 +241,12 @@ var (
 		regexp.MustCompile(`(?i)(password|contraseña|token|secret|api[ _]?key)\s*[:=]\s*\S`),
 		regexp.MustCompile(`\bsk-[A-Za-z0-9]{16,}`),
 		regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}`),
-		regexp.MustCompile(`\b\d{8}[A-Z]\b`),      // DNI
-		regexp.MustCompile(`\b[XYZ]\d{7}[A-Z]\b`), // NIE
+		regexp.MustCompile(`(?i)(password|passwd|contraseña)[^.\n]{0,40}\s(is|es|was|era)\s+\S`), // "la contraseña de X es Y"
+		regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`),                                        // AWS access key
+		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),                        // JWT
+		regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}`),
+		regexp.MustCompile(`\b\d{8}-?[A-Za-z]\b`),           // DNI, also 12345678-Z
+		regexp.MustCompile(`\b[XYZxyz]-?\d{7}-?[A-Za-z]\b`), // NIE
 	}
 )
 

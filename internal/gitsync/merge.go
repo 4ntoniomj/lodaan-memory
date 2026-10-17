@@ -374,7 +374,15 @@ func (a *applier) mergeMemory(ctx context.Context, l *local, in memoryLine) erro
 			if err := a.applyContent(ctx, l, in, status); err != nil {
 				return err
 			}
-			return a.relate(ctx, l.id, copyID, "supersedes")
+			if err := a.relate(ctx, l.id, copyID, "supersedes"); err != nil {
+				return err
+			}
+			// A local edit that was never exported survives only in this copy: the other
+			// machine has never seen it, so the copy and its relation must be exported.
+			if l.dirty {
+				return a.markLocal(ctx, copyID, l.id)
+			}
+			return nil
 		}
 		copyID, err := a.insertCopy(ctx, in.Title, in.Content, in.Kind, in.SessionID, in.OccurredAt, in.CreatedAt, in.UpdatedAt, l.id)
 		if err != nil {
@@ -393,6 +401,19 @@ func (a *applier) mergeMemory(ctx context.Context, l *local, in memoryLine) erro
 		}
 		return a.relate(ctx, l.id, copyID, "supersedes")
 	}
+}
+
+// markLocal marks a copy and its supersedes relation as local changes, so the next export
+// sends them. Setting sync_xid directly does not fire the sync triggers.
+func (a *applier) markLocal(ctx context.Context, copyID, winnerID int64) error {
+	if _, err := a.tx.Exec(ctx, `UPDATE memories SET sync_xid = pg_current_xact_id() WHERE id = $1`, copyID); err != nil {
+		return fmt.Errorf("no se pudo marcar la versión anterior para enviarla: %w", err)
+	}
+	if _, err := a.tx.Exec(ctx, `UPDATE memory_relations SET sync_xid = pg_current_xact_id()
+		WHERE source_id = $1 AND target_id = $2 AND kind = 'supersedes'`, winnerID, copyID); err != nil {
+		return fmt.Errorf("no se pudo marcar la relación con la versión anterior: %w", err)
+	}
+	return nil
 }
 
 // applyContent replaces the content of a local record with the incoming version.
