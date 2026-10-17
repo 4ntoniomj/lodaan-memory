@@ -378,12 +378,12 @@ func TestHooksAntigravityGrupo(t *testing.T) {
 	got := hkJSON(t, e.path(".gemini/config/hooks.json"))
 	wantLodan := map[string]any{"SessionStart": []any{
 		map[string]any{
-			"command": `"C:/x/lodan.exe" hook compact --client antigravity-client --format antigravity`,
+			"command": `C:/x/lodan.exe hook compact --client antigravity-client --format antigravity`,
 			"timeout": float64(15),
 			"type":    "command",
 		},
 		map[string]any{
-			"command": `"C:/x/lodan.exe" hook session-start --client antigravity-client --format antigravity`,
+			"command": `C:/x/lodan.exe hook session-start --client antigravity-client --format antigravity`,
 			"timeout": float64(15),
 			"type":    "command",
 		},

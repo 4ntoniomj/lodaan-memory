@@ -1,6 +1,8 @@
 package install
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"unicode/utf16"
 )
 
 // Lifecycle hooks registered in the AI clients (lodan hook compact | subagent-stop).
@@ -216,10 +219,28 @@ func antigravityGroupValue(bin string) map[string]any {
 	}
 	return map[string]any{
 		"SessionStart": []any{
-			handler(hookCommand(bin, "compact", "antigravity-client", "--format", "antigravity")),
-			handler(hookCommand(bin, "session-start", "antigravity-client", "--format", "antigravity")),
+			handler(antigravityCommand(bin, "compact")),
+			handler(antigravityCommand(bin, "session-start")),
 		},
 	}
+}
+
+// antigravityCommand builds a hook command for Antigravity, which runs it with `cmd /c` and
+// escapes embedded double quotes as \" (cmd does not understand that), so the binary is never
+// quoted: a path without spaces goes as is, and one with spaces goes through PowerShell's
+// -EncodedCommand (base64 of UTF-16LE), which needs no quoting at all.
+func antigravityCommand(bin, action string) string {
+	args := " hook " + action + " --client antigravity-client --format antigravity"
+	if !strings.ContainsAny(bin, " \t") {
+		return strings.ReplaceAll(bin, `\`, "/") + args
+	}
+	script := "& '" + strings.ReplaceAll(bin, "'", "''") + "'" + args
+	units := utf16.Encode([]rune(script))
+	raw := make([]byte, 2*len(units))
+	for i, u := range units {
+		binary.LittleEndian.PutUint16(raw[2*i:], u)
+	}
+	return "powershell -NoProfile -NonInteractive -EncodedCommand " + base64.StdEncoding.EncodeToString(raw)
 }
 
 func antigravityHooksTransform(text, bin string, remove bool) (string, error) {

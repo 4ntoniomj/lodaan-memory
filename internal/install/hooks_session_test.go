@@ -9,7 +9,7 @@ import (
 
 const (
 	hkSessionClaude = `"C:/x/lodan.exe" hook session-start --client claude-code`
-	hkSessionAnti   = `"C:/x/lodan.exe" hook session-start --client antigravity-client --format antigravity`
+	hkSessionAnti   = `C:/x/lodan.exe hook session-start --client antigravity-client --format antigravity`
 	hkSessMatcher   = "startup|resume|clear"
 )
 
