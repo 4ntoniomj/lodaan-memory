@@ -277,12 +277,17 @@ type reviseInput struct {
 	Topics   []string   `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
 	Ops      []reviseOp `json:"ops,omitempty" jsonschema:"Varias operaciones en una sola llamada (máx. 200 en total), con los mismos campos; se aplican en orden y una que falle no frena las demás"`
+
+	// Verdict and Confidence are the inputs of verdict; Confidence is a
+	// pointer so a missing value can be told apart from 0.
+	Verdict    string   `json:"verdict,omitempty" jsonschema:"Veredicto (verdict): id contradice, sustituye, es compatible o no_relacionado con with_id"`
+	Confidence *float64 `json:"confidence,omitempty" jsonschema:"Confianza del veredicto, de 0 a 1 (verdict); por debajo de 0.7 queda pendiente"`
 }
 
 // reviseOp is one operation of the revise tool.
 type reviseOp struct {
 	ID       int64    `json:"id,omitempty" jsonschema:"Id del registro (no hace falta en alias ni reject_alias)"`
-	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias o reject_alias"`
+	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias o verdict"`
 	WithID   int64    `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
 	Relation string   `json:"relation,omitempty" jsonschema:"related, contradicts, part_of o supersedes (por defecto related)"`
 	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
@@ -292,13 +297,19 @@ type reviseOp struct {
 	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8)"`
 	Topics   []string `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
 	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
+
+	// Verdict and Confidence are the inputs of verdict; Confidence is a
+	// pointer so a missing value can be told apart from 0.
+	Verdict    string   `json:"verdict,omitempty" jsonschema:"contradice, sustituye, compatible o no_relacionado (verdict)"`
+	Confidence *float64 `json:"confidence,omitempty" jsonschema:"Confianza del veredicto, de 0 a 1 (verdict); por debajo de 0.7 queda pendiente"`
 }
 
 func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in reviseInput) (*mcp.CallToolResult, any, error) {
 	var ops []reviseOp
 	if in.ID != 0 || in.Action != "" || in.Tag != "" || in.WithTag != "" {
 		ops = append(ops, reviseOp{ID: in.ID, Action: in.Action, WithID: in.WithID, Relation: in.Relation,
-			Title: in.Title, Content: in.Content, Tag: in.Tag, WithTag: in.WithTag, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm})
+			Title: in.Title, Content: in.Content, Tag: in.Tag, WithTag: in.WithTag, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm,
+			Verdict: in.Verdict, Confidence: in.Confidence})
 	}
 	ops = append(ops, in.Ops...)
 	if len(ops) == 0 {
@@ -324,6 +335,9 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 			Tags:     op.Tags,
 			Topics:   op.Topics,
 			Confirm:  op.Confirm,
+
+			Verdict:    op.Verdict,
+			Confidence: op.Confidence,
 		})
 		results[i] = opResult{text: line, err: err}
 	}

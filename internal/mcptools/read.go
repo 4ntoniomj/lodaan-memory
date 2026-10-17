@@ -124,7 +124,7 @@ func label(m map[string]string, key string) string {
 //	#123 [decisión · vigente · 2026-09-28] Título
 //	etiquetas: #a, #b · clave: x
 //	<contenido>
-//	relaciones: sustituye a #45 «t» (confirmada); sustituido por #9 «u» (confirmada)
+//	relaciones: sustituye a #45 «t» (confirmada); relacionado con #9 «u» (confirmada; veredicto compatible, confianza 0.90)
 func formatFull(f memory.Full) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "#%d [%s · %s · %s] %s", f.ID,
@@ -155,7 +155,14 @@ func formatFull(f memory.Full) string {
 					phrase = p[1]
 				}
 			}
-			rels[i] = fmt.Sprintf("%s #%d «%s» (%s)", phrase, r.OtherID, oneLine(r.OtherTitle), label(stateLabels, r.State))
+			state := label(stateLabels, r.State)
+			if r.Verdict != "" {
+				state += "; veredicto " + r.Verdict
+				if r.Confidence != nil {
+					state += fmt.Sprintf(", confianza %.2f", *r.Confidence)
+				}
+			}
+			rels[i] = fmt.Sprintf("%s #%d «%s» (%s)", phrase, r.OtherID, oneLine(r.OtherTitle), state)
 		}
 		b.WriteString("\nrelaciones: " + strings.Join(rels, "; "))
 	}

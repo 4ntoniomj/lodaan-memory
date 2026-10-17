@@ -35,6 +35,9 @@ type lockedMemory struct {
 //     kind r.Relation (default related) between r.ID and r.WithID, in either direction.
 //   - alias / reject_alias: confirms that r.Tag is an alias of r.WithTag (and
 //     retags its records) or that they are different tags; no id needed.
+//   - verdict: applies r.Verdict ("r.ID <verdict> r.WithID") when r.Confidence
+//     reaches 0.7, or stores it as a suggested relation otherwise; the
+//     relation row keeps the verdict and the confidence.
 //
 // tr may be nil; otherwise activity is recorded on its session.
 func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (string, error) {
@@ -67,8 +70,10 @@ func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (
 		return s.alias(ctx, r)
 	case "reject_alias":
 		return s.rejectAlias(ctx, r)
+	case "verdict":
+		return s.verdict(ctx, r)
 	default:
-		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias)", r.Action)
+		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict)", r.Action)
 	}
 }
 
@@ -282,30 +287,37 @@ func (s *Service) supersede(ctx context.Context, r Revision) (string, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	locked, err := lockMemories(ctx, tx, r.ID, r.WithID)
-	if err != nil {
-		return "", err
-	}
-	if err := requireActive(r.ID, locked[r.ID], "solo se pueden sustituir los vigentes"); err != nil {
-		return "", err
-	}
-	if err := requireActive(r.WithID, locked[r.WithID], "el que sustituye debe estar vigente"); err != nil {
-		return "", err
-	}
-
-	if _, err := tx.Exec(ctx, `UPDATE memories SET status = 'superseded', updated_at = now() WHERE id = $1`, r.ID); err != nil {
-		return "", fmt.Errorf("no se pudo sustituir el registro #%d: %w", r.ID, err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE memory_topics SET active = false WHERE memory_id = $1`, r.ID); err != nil {
-		return "", fmt.Errorf("no se pudieron desactivar los temas del registro #%d: %w", r.ID, err)
-	}
-	if err := upsertRelation(ctx, tx, r.WithID, r.ID, "supersedes", "confirmed"); err != nil {
+	if err := supersedeIn(ctx, tx, r.ID, r.WithID); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", fmt.Errorf("no se pudo confirmar la sustitución: %w", err)
 	}
 	return fmt.Sprintf("#%d sustituido por #%d", r.ID, r.WithID), nil
+}
+
+// supersedeIn marks oldID as superseded by the active record newID inside tx:
+// it locks both, deactivates the old record's topics and confirms the
+// supersedes relation newID -> oldID.
+func supersedeIn(ctx context.Context, tx pgx.Tx, oldID, newID int64) error {
+	locked, err := lockMemories(ctx, tx, oldID, newID)
+	if err != nil {
+		return err
+	}
+	if err := requireActive(oldID, locked[oldID], "solo se pueden sustituir los vigentes"); err != nil {
+		return err
+	}
+	if err := requireActive(newID, locked[newID], "el que sustituye debe estar vigente"); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE memories SET status = 'superseded', updated_at = now() WHERE id = $1`, oldID); err != nil {
+		return fmt.Errorf("no se pudo sustituir el registro #%d: %w", oldID, err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE memory_topics SET active = false WHERE memory_id = $1`, oldID); err != nil {
+		return fmt.Errorf("no se pudieron desactivar los temas del registro #%d: %w", oldID, err)
+	}
+	return upsertRelation(ctx, tx, newID, oldID, "supersedes", "confirmed")
 }
 
 // invalidate implements the "invalidate" action.

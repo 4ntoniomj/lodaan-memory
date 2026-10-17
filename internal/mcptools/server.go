@@ -70,7 +70,7 @@ const (
 	descRemember = "Guarda registros (máx. 200 por llamada). Deduplica, resuelve temas, crea las relaciones de relate y lista con «revisa:» registros a comprobar por si contradicen o se relacionan."
 	descRecall   = "Recupera lo relevante para una o varias preguntas (queries, máx. 200) en lenguaje natural: ficha del tema, últimos eventos y resultados. Llámala en cuanto surja un tema."
 	descGet      = "Devuelve el contenido completo y las relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
-	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm) o relaciones (relate, confirm_relation, reject_relation)."
+	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm) o relaciones (relate, confirm_relation, reject_relation, verdict)."
 	descSession  = "Consulta o cierra conversaciones, una o varias en ops (máx. 200): last (filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
 	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones y Ollama."
 )
@@ -113,7 +113,7 @@ var kindNames = []string{
 	string(memory.KindEvent), string(memory.KindNote),
 }
 
-var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation", "alias", "reject_alias"}
+var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation", "alias", "reject_alias", "verdict"}
 
 var relationKinds = []string{"related", "contradicts", "part_of", "supersedes"}
 

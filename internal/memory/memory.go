@@ -150,6 +150,10 @@ type Relation struct {
 	OtherTitle  string
 	// Outgoing is true when the record is the source of the relation.
 	Outgoing bool
+	// Verdict and Confidence are the stored verdict of the relation (see
+	// Service.Revise, action verdict); Verdict is empty and Confidence nil when none.
+	Verdict    string
+	Confidence *float64
 }
 
 // Full is a complete record with its topics and relations.
@@ -171,7 +175,7 @@ type Full struct {
 // Revision describes a change to an existing record; see Service.Revise.
 type Revision struct {
 	ID     int64
-	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation
+	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict
 	WithID int64
 	// Relation is the relation kind for relate, confirm_relation and reject_relation.
 	Relation string
@@ -184,6 +188,10 @@ type Revision struct {
 	Topics []string
 	// Confirm must be true for delete.
 	Confirm bool
+	// Verdict (contradice, sustituye, compatible, no_relacionado) and
+	// Confidence (0..1, required; nil means missing) are the inputs of verdict.
+	Verdict    string
+	Confidence *float64
 }
 
 // Service saves, revises and reads memory records. It is safe for concurrent use.
