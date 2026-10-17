@@ -28,6 +28,7 @@ Subcomandos:
   uninstall Desinstala lodan (los datos se conservan salvo con --purge)
   service   Gestiona el servicio de sistema: start | stop | restart | enable | disable | status
   bench     Ejecuta el benchmark (--rows, --out)
+  hook      Hooks de los clientes de IA: compact | subagent-stop (siempre salen con 0)
   sync      Sincroniza la memoria con otras máquinas por git, cifrada: init | push | pull
 
 Copias de seguridad (paran PostgreSQL solo mientras se copian los datos; la compresión
@@ -82,6 +83,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runBench(rest, stderr)
 	case "sync":
 		return runSync(rest, stdout, stderr)
+	case "hook":
+		return runHookCommand(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "lodan: subcomando desconocido %q\n\n", name)
 		fmt.Fprint(stderr, usageText)
