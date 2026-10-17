@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -133,6 +134,14 @@ func runSyncTransfer(action string, args []string, stdout, stderr io.Writer) int
 	if !ok {
 		fmt.Fprintln(stderr, gitsync.ErrNotConfigured)
 		return 1
+	}
+
+	// The scheduled task and the session-start pull run without a console: everything they
+	// print is also kept in <datos>/logs/sync.log.
+	if f, err := openSyncLog(cfg); err == nil {
+		defer f.Close()
+		fmt.Fprintf(f, "--- %s lodan sync %s\n", time.Now().Format("2006-01-02 15:04:05"), action)
+		stdout, stderr = io.MultiWriter(stdout, f), io.MultiWriter(stderr, f)
 	}
 
 	sigCtx, stop := signalContext()
@@ -264,6 +273,14 @@ func runSyncSchedule(action string, args []string, stdout, stderr io.Writer) int
 	}
 	fmt.Fprintf(stdout, "Sincronización automática cada %d minutos (tarea %s de tu usuario).\n", every, gitsync.TaskName)
 	return 0
+}
+
+// openSyncLog opens <datos>/logs/sync.log for appending.
+func openSyncLog(cfg config.Config) (*os.File, error) {
+	if err := os.MkdirAll(cfg.LogsDir(), 0o700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filepath.Join(cfg.LogsDir(), "sync.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 }
 
 func fileExistsCLI(path string) bool {
