@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -58,6 +59,23 @@ func (r *Resolver) Canonical(ctx context.Context, slug string) (string, bool, er
 // exceptID (the one being saved, 0 if none) is not counted in Records, and the
 // tags in skip (created in the same call, so not existing before) are ignored.
 func (r *Resolver) Suggest(ctx context.Context, slug string, exceptID int64, skip []string, store bool) ([]Suggestion, error) {
+	return r.suggest(ctx, slug, r.cachedVec(slug), exceptID, skip, store)
+}
+
+// PreviewSuggest is Suggest for a tag that does not exist yet: it embeds the
+// slug itself (nothing is cached or stored).
+func (r *Resolver) PreviewSuggest(ctx context.Context, slug string, skip []string) ([]Suggestion, error) {
+	vec, err := r.embedSlug(ctx, slug, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	if err := r.loadIfStale(ctx); err != nil {
+		return nil, err
+	}
+	return r.suggest(ctx, slug, vec, 0, skip, false)
+}
+
+func (r *Resolver) suggest(ctx context.Context, slug string, vec []float32, exceptID int64, skip []string, store bool) ([]Suggestion, error) {
 	rows, err := r.pool.Query(ctx, `SELECT t.slug, count(DISTINCT m.id)::int
 		FROM topics t
 		LEFT JOIN memory_topics mt ON mt.topic_id = t.id
@@ -84,7 +102,7 @@ func (r *Resolver) Suggest(ctx context.Context, slug string, exceptID int64, ski
 		return nil, fmt.Errorf("no se pudieron leer las etiquetas: %w", err)
 	}
 
-	similar := r.similarByEmbedding(slug)
+	similar := r.similarTo(slug, vec)
 	var out []Suggestion
 	for s, n := range counts {
 		if pluralPair(slug, s) || (len(slug) >= minEditLen && len(s) >= minEditLen && oneEdit(slug, s)) || similar[s] {
@@ -111,18 +129,23 @@ func (r *Resolver) Suggest(ctx context.Context, slug string, exceptID int64, ski
 	return out, nil
 }
 
-// similarByEmbedding returns the cached tags whose embedding is at least the
-// threshold similar to the cached embedding of slug (none if slug has none).
-func (r *Resolver) similarByEmbedding(slug string) map[string]bool {
+// cachedVec returns the cached embedding of slug, or nil.
+func (r *Resolver) cachedVec(slug string) []float32 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var vec []float32
 	for _, c := range r.withVec {
 		if c.topic.Slug == slug {
-			vec = c.vec
-			break
+			return c.vec
 		}
 	}
+	return nil
+}
+
+// similarTo returns the cached tags other than slug whose embedding is at least
+// the threshold similar to vec (none if vec is nil).
+func (r *Resolver) similarTo(slug string, vec []float32) map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make(map[string]bool)
 	if vec == nil {
 		return out
@@ -180,4 +203,49 @@ func deletionOf(long, short string) bool {
 		}
 	}
 	return false
+}
+
+// Peek resolves tag names like Resolve but writes nothing: aliases and
+// hyphen-insensitive matches are applied, and a tag that does not exist yet is
+// returned with ID 0 and Created set (it would be created by a real save).
+func (r *Resolver) Peek(ctx context.Context, raw []string) ([]Resolution, error) {
+	var out []Resolution
+	seenSlug := make(map[string]bool, len(raw))
+	seenFinal := make(map[string]bool, len(raw))
+	for _, name := range raw {
+		slug := Normalize(name)
+		if slug == "" || seenSlug[slug] {
+			continue
+		}
+		seenSlug[slug] = true
+		target := slug
+		canonical, isAlias, err := r.Canonical(ctx, slug)
+		if err != nil {
+			return nil, err
+		}
+		if isAlias {
+			target = canonical
+		}
+		var id int32
+		var found string
+		err = r.pool.QueryRow(ctx, `SELECT id, slug FROM topics
+			WHERE slug = $1 OR replace(slug, '-', '') = replace($1, '-', '')
+			ORDER BY slug = $1 DESC, id LIMIT 1`, target).Scan(&id, &found)
+		res := Resolution{Requested: slug}
+		switch {
+		case err == nil:
+			res.Topic = Topic{ID: id, Slug: found}
+		case errors.Is(err, pgx.ErrNoRows):
+			res.Topic, res.Created = Topic{Slug: target}, true
+		default:
+			return nil, fmt.Errorf("no se pudo buscar el tema %q: %w", target, err)
+		}
+		res.Equivalent = res.Topic.Slug != slug
+		if seenFinal[res.Topic.Slug] {
+			continue
+		}
+		seenFinal[res.Topic.Slug] = true
+		out = append(out, res)
+	}
+	return out, nil
 }

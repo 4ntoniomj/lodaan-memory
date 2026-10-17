@@ -16,7 +16,8 @@ import (
 
 // rememberInput is the input of the remember tool.
 type rememberInput struct {
-	Items []rememberItem `json:"items" jsonschema:"Registros a guardar (1-200)"`
+	Items   []rememberItem `json:"items" jsonschema:"Registros a guardar (1-200)"`
+	Preview bool           `json:"preview,omitempty" jsonschema:"true: comprueba todo (etiquetas, alias, duplicados, clave, conexiones, revisa) sin guardar nada"`
 }
 
 type rememberItem struct {
@@ -62,30 +63,64 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 			Relate:     relate,
 		}
 	}
+	if in.Preview {
+		return s.preview(ctx, items)
+	}
 	saved, err := s.d.Memory.Remember(ctx, tr, items)
 	if err != nil {
 		return errorResult(err), nil, nil
 	}
-	return textResult(formatReviewed(saved, s.connections(ctx, saved), s.reviewCandidates(ctx, items, saved))), nil, nil
+	return textResult(formatReviewed(saved, s.extras(ctx, items, saved), s.reviewCandidates(ctx, items, saved))), nil, nil
 }
 
-// connections finds, for every newly saved item, the active records connected
-// to it by rare tags. The search is best effort: if it fails, there are none.
-func (s *Server) connections(ctx context.Context, saved []memory.Saved) [][]recall.Link {
-	out := make([][]recall.Link, len(saved))
+// savedExtras is what remember reports about a saved item besides its line:
+// the records connected by rare tags and the suggested key.
+type savedExtras struct {
+	links  []recall.Link
+	key    string
+	keyFor int64
+}
+
+// extras finds, for every newly saved item, the active records connected to it
+// by rare tags and, if it has no key, the key of a connected record it would
+// update. The search is best effort: if it fails, there is nothing to report.
+func (s *Server) extras(ctx context.Context, items []memory.Item, saved []memory.Saved) []savedExtras {
+	out := make([]savedExtras, len(saved))
 	for i, sv := range saved {
 		if sv.Duplicate {
 			continue
 		}
-		if links, err := s.d.Recall.Connected(ctx, []int64{sv.ID}, nil, maxLinks); err == nil {
-			out[i] = links
+		links, err := s.d.Recall.Connected(ctx, []int64{sv.ID}, nil, maxKeyLinks)
+		if err != nil {
+			continue
 		}
+		if strings.TrimSpace(items[i].Key) == "" {
+			out[i].key, out[i].keyFor = s.suggestKey(ctx, links, sv.Topics, items[i].Title)
+		}
+		out[i].links = links[:min(len(links), maxLinks)]
 	}
 	return out
 }
 
-// maxLinks is the maximum number of connected records listed per saved item.
-const maxLinks = 5
+// suggestKey returns the key of a connected record the item would update, or "".
+func (s *Server) suggestKey(ctx context.Context, links []recall.Link, tags []topic.Resolution, title string) (string, int64) {
+	slugs := make([]string, len(tags))
+	for i, r := range tags {
+		slugs[i] = r.Topic.Slug
+	}
+	key, id, ok, err := s.d.Recall.SuggestKey(ctx, links, slugs, title)
+	if err != nil || !ok {
+		return "", 0
+	}
+	return key, id
+}
+
+const (
+	// maxLinks is the maximum number of connected records listed per item.
+	maxLinks = 5
+	// maxKeyLinks is how many connected records are checked for a suggested key.
+	maxKeyLinks = 200
+)
 
 // formatLinks renders links as "#12 (#tag, 5.3), #8 (#tag, 4.1)".
 func formatLinks(links []recall.Link) string {
@@ -164,15 +199,20 @@ func formatSaved(saved []memory.Saved) string {
 
 // formatReviewed renders one line per saved item, each followed by its review
 // candidates ("  revisa: <recall line>"). candidates may be nil.
-func formatReviewed(saved []memory.Saved, links [][]recall.Link, candidates [][]recall.Item) string {
+func formatReviewed(saved []memory.Saved, extras []savedExtras, candidates [][]recall.Item) string {
 	lines := make([]string, 0, len(saved))
 	for i, sv := range saved {
 		lines = append(lines, formatOneSaved(sv))
 		for _, sg := range sv.Suggestions {
 			lines = append(lines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
 		}
-		if i < len(links) && len(links[i]) > 0 {
-			lines = append(lines, "  conectado por etiquetas: "+formatLinks(links[i]))
+		if i < len(extras) {
+			if extras[i].key != "" {
+				lines = append(lines, fmt.Sprintf("  clave sugerida: %s (sustituiría a #%d)", extras[i].key, extras[i].keyFor))
+			}
+			if len(extras[i].links) > 0 {
+				lines = append(lines, "  conectado por etiquetas: "+formatLinks(extras[i].links))
+			}
 		}
 		if i < len(candidates) {
 			for _, c := range candidates[i] {
