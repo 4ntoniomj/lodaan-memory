@@ -80,6 +80,9 @@ type Options struct {
 	// the configuration, topic_detect_similarity). It is independent of the
 	// equivalence threshold of the topic.Resolver, which is not used here.
 	TopicDetectThreshold float64
+	// TagLinkStrength is the strength (Σ ln(N/n) over shared tags) two records
+	// need to be connected (config tag_link_strength; default 3.0).
+	TagLinkStrength float64
 	// CacheSize is the number of query embeddings kept in memory (default 256).
 	CacheSize int
 }
@@ -103,6 +106,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.CacheSize <= 0 {
 		o.CacheSize = defaultCacheSize
+	}
+	if o.TagLinkStrength <= 0 {
+		o.TagLinkStrength = defaultTagLinkStrength
 	}
 	return o
 }
@@ -153,6 +159,9 @@ type Result struct {
 	Events []Item
 	// Results are the other matches, best first, without the records in Profile or Events.
 	Results []Item
+	// Connected are the active records connected by rare tags to the first
+	// results and not shown elsewhere in the answer.
+	Connected []Link
 	// TextOnly is true when the embedding service was unavailable and only full-text search was used.
 	TextOnly bool
 }
@@ -375,6 +384,21 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	}
 	res.Results, err = s.details(ctx, ids)
 	if err != nil {
+		return Result{}, err
+	}
+
+	// Conectados por etiquetas raras con los primeros resultados, sin repetir lo mostrado.
+	var sources, seen []int64
+	for i, it := range res.Results {
+		if i < connectedSources {
+			sources = append(sources, it.ID)
+		}
+		seen = append(seen, it.ID)
+	}
+	for id := range shown {
+		seen = append(seen, id)
+	}
+	if res.Connected, err = s.Connected(ctx, sources, seen, maxConnected); err != nil {
 		return Result{}, err
 	}
 	return res, nil

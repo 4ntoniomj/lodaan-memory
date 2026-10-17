@@ -66,7 +66,34 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 	if err != nil {
 		return errorResult(err), nil, nil
 	}
-	return textResult(formatReviewed(saved, s.reviewCandidates(ctx, items, saved))), nil, nil
+	return textResult(formatReviewed(saved, s.connections(ctx, saved), s.reviewCandidates(ctx, items, saved))), nil, nil
+}
+
+// connections finds, for every newly saved item, the active records connected
+// to it by rare tags. The search is best effort: if it fails, there are none.
+func (s *Server) connections(ctx context.Context, saved []memory.Saved) [][]recall.Link {
+	out := make([][]recall.Link, len(saved))
+	for i, sv := range saved {
+		if sv.Duplicate {
+			continue
+		}
+		if links, err := s.d.Recall.Connected(ctx, []int64{sv.ID}, nil, maxLinks); err == nil {
+			out[i] = links
+		}
+	}
+	return out
+}
+
+// maxLinks is the maximum number of connected records listed per saved item.
+const maxLinks = 5
+
+// formatLinks renders links as "#12 (#tag, 5.3), #8 (#tag, 4.1)".
+func formatLinks(links []recall.Link) string {
+	parts := make([]string, len(links))
+	for i, l := range links {
+		parts[i] = fmt.Sprintf("#%d (#%s, %.1f)", l.ID, l.Tag, l.Strength)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // reviewCandidates finds, for every newly saved item, the existing records it
@@ -132,17 +159,20 @@ func parseDay(s string) (*time.Time, error) {
 
 // formatSaved renders one line per saved item.
 func formatSaved(saved []memory.Saved) string {
-	return formatReviewed(saved, nil)
+	return formatReviewed(saved, nil, nil)
 }
 
 // formatReviewed renders one line per saved item, each followed by its review
 // candidates ("  revisa: <recall line>"). candidates may be nil.
-func formatReviewed(saved []memory.Saved, candidates [][]recall.Item) string {
+func formatReviewed(saved []memory.Saved, links [][]recall.Link, candidates [][]recall.Item) string {
 	lines := make([]string, 0, len(saved))
 	for i, sv := range saved {
 		lines = append(lines, formatOneSaved(sv))
 		for _, sg := range sv.Suggestions {
 			lines = append(lines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
+		}
+		if i < len(links) && len(links[i]) > 0 {
+			lines = append(lines, "  conectado por etiquetas: "+formatLinks(links[i]))
 		}
 		if i < len(candidates) {
 			for _, c := range candidates[i] {

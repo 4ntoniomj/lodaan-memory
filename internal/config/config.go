@@ -29,6 +29,7 @@ type Config struct {
 	DupSimilarity         float64 `json:"dup_similarity"`
 	TopicSimilarity       float64 `json:"topic_similarity"`        // two topic names are equivalent
 	TopicDetectSimilarity float64 `json:"topic_detect_similarity"` // a query is detected as belonging to a topic
+	TagLinkStrength       float64 `json:"tag_link_strength"`       // two records are connected when their shared tags add up to this (Σ ln(N/n))
 	SyncRepo              string  `json:"sync_repo,omitempty"`     // git URL of the sync repository; empty means sync is off
 	SyncMachine           string  `json:"sync_machine,omitempty"`  // this machine's folder in the sync repository
 	SyncKeyFile           string  `json:"sync_key_file,omitempty"` // age key; kept outside DataDir so backups never carry it
@@ -51,6 +52,7 @@ func Default() Config {
 		DupSimilarity:         0.92,
 		TopicSimilarity:       0.72, // calibrated with the reference model, see specs/001-nucleo-memoria/calibracion.md
 		TopicDetectSimilarity: 0.40,
+		TagLinkStrength:       3.0,
 	}
 }
 
@@ -139,6 +141,7 @@ func applyEnv(cfg *Config) error {
 		{"LODAN_DUP_SIMILARITY", &cfg.DupSimilarity},
 		{"LODAN_TOPIC_SIMILARITY", &cfg.TopicSimilarity},
 		{"LODAN_TOPIC_DETECT_SIMILARITY", &cfg.TopicDetectSimilarity},
+		{"LODAN_TAG_LINK_STRENGTH", &cfg.TagLinkStrength},
 	}
 	for _, f := range floats {
 		v := os.Getenv(f.name)
@@ -173,6 +176,9 @@ func (c Config) Validate() error {
 	}
 	if !(c.TopicDetectSimilarity > 0 && c.TopicDetectSimilarity <= 1) {
 		return fmt.Errorf("topic_detect_similarity debe estar en (0,1], y es %v", c.TopicDetectSimilarity)
+	}
+	if !(c.TagLinkStrength > 0) {
+		return fmt.Errorf("tag_link_strength debe ser mayor que 0, y es %v", c.TagLinkStrength)
 	}
 	if c.RecallMaxBytes < 500 {
 		return fmt.Errorf("recall_max_bytes debe ser al menos 500, y es %d", c.RecallMaxBytes)

@@ -23,8 +23,11 @@ const (
 	candidateMinSimilarity = 0.6
 	// sameTopicLimit bounds how many records of the topics are ranked.
 	sameTopicLimit = 200
-	// sameTopicBonus puts every record of the same topics before the others.
-	sameTopicBonus = 1.0
+	// rareTagRecords is the most records a tag can carry to count as rare: a
+	// candidate sharing a rare tag gets rareTagBonus and ranks before every
+	// candidate that only shares common tags or only matches by text or meaning.
+	rareTagRecords = 4
+	rareTagBonus   = 1.0
 )
 
 // CandidateRequest asks for the records a newly saved one should be checked
@@ -64,13 +67,16 @@ func (s *Service) Candidates(ctx context.Context, req CandidateRequest) ([]Item,
 
 	score := make(map[int64]float64)
 	if len(req.TopicIDs) > 0 {
-		same, err := s.sameTopic(ctx, req.TopicIDs, excludeList)
+		shared, err := s.sharedTags(ctx, req.TopicIDs, excludeList)
 		if err != nil {
 			return nil, err
 		}
-		for i, id := range same {
-			// Most recent first among the records that match no other source.
-			score[id] += sameTopicBonus + 1e-6/float64(i+1)
+		for _, c := range shared {
+			// Rare shared tags weigh more than common ones (Σ ln(N/n)).
+			score[c.id] += c.strength
+			if c.minRecords <= rareTagRecords {
+				score[c.id] += rareTagBonus
+			}
 		}
 	}
 
@@ -117,12 +123,33 @@ func (s *Service) Candidates(ctx context.Context, req CandidateRequest) ([]Item,
 }
 
 // sameTopic returns the active records of the topics, most recent first.
-func (s *Service) sameTopic(ctx context.Context, topicIDs []int32, exclude []int64) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, SameTopicSQL, topicIDs, exclude, sameTopicLimit)
+func (s *Service) sharedTags(ctx context.Context, topicIDs []int32, exclude []int64) ([]sharedTag, error) {
+	rows, err := s.pool.Query(ctx, SharedTagsSQL, topicIDs, exclude, sameTopicLimit)
 	if err != nil {
-		return nil, fmt.Errorf("no se pudieron leer los registros del tema: %w", err)
+		return nil, fmt.Errorf("no se pudieron leer los registros de las etiquetas: %w", err)
 	}
-	return scanIDs(rows)
+	defer rows.Close()
+	var out []sharedTag
+	for rows.Next() {
+		var c sharedTag
+		if err := rows.Scan(&c.id, &c.strength, &c.minRecords); err != nil {
+			return nil, fmt.Errorf("no se pudo leer un registro de las etiquetas: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("no se pudieron leer los registros de las etiquetas: %w", err)
+	}
+	return out, nil
+}
+
+// sharedTag is an active record that shares tags with a new item.
+type sharedTag struct {
+	id int64
+	// strength is Σ ln(N/n) over the shared tags.
+	strength float64
+	// minRecords is n of the rarest shared tag.
+	minRecords int
 }
 
 // isShortNumber reports whether w is a number of at most four digits, such as

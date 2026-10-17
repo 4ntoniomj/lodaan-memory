@@ -47,13 +47,27 @@ var CandidateTextSQL = `SELECT id FROM (
 	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC
 	LIMIT $3`
 
-// SameTopicSQL is the statement of the active records of some topics, most
-// recent first, used for the review candidates of a new record. Parameters: $1
-// the topic ids, $2 the ids to leave out and $3 the maximum number of rows.
-const SameTopicSQL = `SELECT m.id FROM memories m
+// SharedTagsSQL is the statement of the active records that share tags with a
+// new record, used for its review candidates: for each one, the strength of the
+// link (Σ ln(N/n) over the shared tags, N active records, n active records with
+// the tag) and n of its rarest shared tag, strongest first. Parameters: $1 the
+// tag (topic) ids, $2 the ids to leave out and $3 the maximum number of rows.
+const SharedTagsSQL = `WITH total AS (
+		SELECT count(*)::float8 AS n FROM memories WHERE status = 'active'
+	), tagcount AS (
+		SELECT mt.topic_id, count(DISTINCT mt.memory_id)::float8 AS n
+		FROM memory_topics mt JOIN memories m ON m.id = mt.memory_id AND m.status = 'active'
+		WHERE mt.topic_id = ANY($1)
+		GROUP BY mt.topic_id
+	)
+	SELECT m.id, sum(ln(total.n / tc.n)), min(tc.n)::int
+	FROM memories m
+	JOIN memory_topics mt ON mt.memory_id = m.id AND mt.topic_id = ANY($1)
+	JOIN tagcount tc ON tc.topic_id = mt.topic_id
+	CROSS JOIN total
 	WHERE m.status = 'active' AND NOT (m.id = ANY($2))
-		AND EXISTS (SELECT 1 FROM memory_topics mt WHERE mt.memory_id = m.id AND mt.topic_id = ANY($1))
-	ORDER BY m.occurred_at DESC, m.id DESC
+	GROUP BY m.id
+	ORDER BY 2 DESC, m.id DESC
 	LIMIT $3`
 
 // ProfileSQL is the statement of the stable records (facts, preferences and

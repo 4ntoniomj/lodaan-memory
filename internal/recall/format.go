@@ -100,6 +100,12 @@ func (r Result) lines() []string {
 	section("Datos estables:", r.Profile)
 	section("Últimos eventos:", r.Events)
 	section("Resultados:", r.Results)
+	if len(r.Connected) > 0 {
+		out = append(out, "Conectado por etiquetas:")
+		for _, l := range r.Connected {
+			out = append(out, l.line()+" (por #"+l.Tag+")")
+		}
+	}
 	return out
 }
 
