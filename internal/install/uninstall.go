@@ -151,6 +151,17 @@ func (in *Installer) removeClients(ctx context.Context) error {
 	if changedCount == 0 && problems == 0 {
 		in.ok("ningún cliente tenía la entrada de lodan (ya estaba)")
 	}
+	files, err := UninstallHooks(in.Env, in.opt.DryRun)
+	for _, f := range files {
+		if in.opt.DryRun {
+			in.would("hooks de lodan: se quitarían de %s", f)
+		} else {
+			in.ok("hooks de lodan quitados de %s", f)
+		}
+	}
+	if err != nil {
+		in.warn("%v", err)
+	}
 	return nil
 }
 

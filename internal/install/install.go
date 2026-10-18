@@ -1011,7 +1011,29 @@ func (in *Installer) stepClients(ctx context.Context) error {
 			in.ok("%s: entrada lodan añadida en %s", c.Name, c.File())
 		}
 	}
+	in.installHooks()
 	return nil
+}
+
+// installHooks registers lodan's lifecycle hooks (compaction and subagent stop) in the
+// clients that support them.
+func (in *Installer) installHooks() {
+	files, err := InstallHooks(in.Env, in.bin, in.opt.DryRun)
+	for _, f := range files {
+		if in.opt.DryRun {
+			in.would("hooks de lodan: se actualizaría %s", f)
+		} else {
+			in.ok("hooks de lodan registrados en %s", f)
+		}
+	}
+	switch {
+	case err != nil && IsWarning(err):
+		in.warn("%v", err)
+	case err != nil:
+		in.fail("%v", err)
+	case len(files) == 0:
+		in.ok("hooks de lodan: ya estaban")
+	}
 }
 
 // --- step 8: skill and instructions ---

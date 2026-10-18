@@ -1,6 +1,6 @@
 # Codebase
 
-Última actualización: 2026-09-29
+Última actualización: 2026-10-18
 
 | Tecnología | Tipo | Versión | Notas |
 | :--- | :--- | :--- | :--- |
@@ -10,17 +10,18 @@
 | github.com/pgvector/pgvector-go | librería | v0.4.1 | Tipos `vector`/`halfvec` para pgx |
 | github.com/oklog/ulid/v2 | librería | v2.1.2 | Identificadores de sesión ordenables por tiempo |
 | github.com/google/jsonschema-go | librería | v0.4.3 | Esquemas de entrada de las herramientas MCP (enums) |
+| filippo.io/age | librería | v1.3.2 | Cifrado de los ficheros de sincronización (X25519) |
 | github.com/klauspost/compress | librería | v1.20.1 | zstd: compresión de los backups (`.tar.zst`) y descompresión de los paquetes de Ollama |
 | github.com/jackc/pgpassfile | librería | v1.0.0 | Indirecta (pgx) |
 | github.com/jackc/pgservicefile | librería | v0.0.0-20240606120523-5a60cdf6a761 | Indirecta (pgx) |
-| golang.org/x/text | librería | v0.29.0 | Indirecta (pgx) |
+| golang.org/x/text | librería | v0.41.0 | Indirecta (pgx) |
 | github.com/jackc/puddle/v2 | librería | v2.2.2 | Indirecta (pgxpool) |
-| golang.org/x/sync | librería | v0.20.0 | Indirecta |
+| golang.org/x/sync | librería | v0.22.0 | Indirecta |
 | github.com/segmentio/asm | librería | v1.1.3 | Indirecta (SDK MCP) |
 | github.com/segmentio/encoding | librería | v0.5.4 | Indirecta (SDK MCP) |
 | github.com/yosida95/uritemplate/v3 | librería | v3.0.2 | Indirecta (SDK MCP) |
 | golang.org/x/oauth2 | librería | v0.35.0 | Indirecta (SDK MCP) |
-| golang.org/x/sys | librería | v0.41.0 | Servicio de Windows (SCM) y llamadas al sistema |
+| golang.org/x/sys | librería | v0.47.0 | Servicio de Windows (SCM) y llamadas al sistema |
 | golang.org/x/time | librería | v0.15.0 | Indirecta |
 | PostgreSQL | base de datos | ≥ 16 (desarrollo: 18) | En Windows, conda-forge solo tiene pgvector para PG 16 |
 | pgvector | base de datos (extensión) | ≥ 0.7.0 (objetivo: 0.8.6) | `halfvec`, `binary_quantize`, HNSW |
@@ -34,6 +35,14 @@
 ## Módulos de implementación
 
 Estado actual de cada funcionalidad en `internal/`:
+
+### Sincronización entre máquinas
+
+**Ubicación:** `internal/gitsync/` (CLI `lodan sync`, migraciones `0003_sync.sql` y `0004_tags.sql`). Exporta los cambios locales a ficheros por lotes cifrados con age en un repositorio git, uno por máquina, e importa los de las demás con reglas de fusión deterministas. El formato del fichero es `lodan-sync/1` por defecto; cuando el lote lleva al menos un alias confirmado o rechazado (las sugerencias se quedan locales), el writer emite `lodan-sync/2`. El reader acepta ambos. Las líneas de relación llevan el veredicto y la confianza cuando los hay (`verdict`, `confidence`); los alias son last-write-wins por `updated_at` y, cuando entra un alias `confirmed`, los records locales que tenían la etiqueta original se reetiquetan al canónico. Ver `internal/gitsync/CLAUDE.md`.
+
+### Hooks de los clientes de IA
+
+**Ubicación:** `internal/hook/` (CLI `lodan hook`). Instrucciones de recuperación tras compactar, resumen de la compactación y captura de `## Key Learnings` de los subagentes. Ver `internal/hook/CLAUDE.md`.
 
 ### Database cluster
 
@@ -103,10 +112,10 @@ La parada de PostgreSQL dura lo que tarda la copia (pasos 4 a 7) y el destino ne
 
 ### Otros módulos
 
-- **memory:** Guardar registros (`internal/memory/`).
-- **recall:** Búsqueda por tema (`internal/recall/`).
-- **topic:** Gestión de etiquetas y temas (`internal/topic/`).
+- **memory:** Guardar y revisar registros (`internal/memory/`). Además de `remember`, `get` y `revise` (con `update`, `supersede`, `invalidate`, `delete`, `relate`, `confirm_relation`, `reject_relation`, `alias`, `reject_alias`, `verdict`, `merge`), incluye la vista previa de `remember` (`preview: true`), la sugerencia de clave (`<etiqueta concreta>/<atributo>`), el veredicto de conflictos con su confianza y el merge con huella de 8 hex para juntar duplicados.
+- **recall:** Búsqueda por tema (`internal/recall/`); al final de cada pregunta muestra los registros conectados por las etiquetas concretas del primer resultado, con fuerza `Σ ln(N/n)` y umbral configurable (`tag_link_strength`, por defecto 3.0).
+- **topic:** Resolución de etiquetas (`internal/topic/`), alias confirmados, sugerencias de alias, igualdad sin guiones (`coche-4860-ngl` = `coche-4860ngl`) y deduplicación. Sin fusión por parecido.
 - **session:** Sesiones y contexto (`internal/session/`).
 - **embedding:** Cálculo y búsqueda de embeddings vía Ollama (`internal/embedding/`).
-- **mcptools:** Definición de herramientas MCP (`internal/mcptools/`).
-- **config:** Configuración global (`internal/config/`).
+- **mcptools:** Definición de herramientas MCP (`internal/mcptools/`) — `remember`, `recall`, `get`, `revise`, `session` y `status` (siempre seis, ninguna más). Las descripciones de cada herramienta están en este paquete, no en la skill.
+- **config:** Configuración global (`internal/config/`); añade `tag_link_strength` para el umbral de conexión por rareza.

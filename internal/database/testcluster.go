@@ -120,7 +120,7 @@ func (tc *TestCluster) Reset(t testing.TB) {
 	defer cancel()
 
 	_, err := tc.Pool.Exec(ctx, `TRUNCATE memories, sessions, topics, memory_topics, session_topics,
-		memory_relations, embedding_models RESTART IDENTITY CASCADE`)
+		memory_relations, embedding_models, tag_aliases RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("no se pudieron vaciar las tablas: %v", err)
 	}

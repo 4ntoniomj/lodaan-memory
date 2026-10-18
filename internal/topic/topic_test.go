@@ -177,37 +177,58 @@ func TestResolver(t *testing.T) {
 		}
 	})
 
-	run("equivalente por embedding (criterio 6)", func(t *testing.T, ctx context.Context) {
+	run("S3 a similar new slug is created as its own topic, not merged", func(t *testing.T, ctx context.Context) {
 		r := NewResolver(tc.Pool, fake, testThreshold)
 		base, err := r.Resolve(ctx, []string{"entrenamiento"})
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(base) != 1 || !base[0].Created {
+			t.Errorf("la primera resolución debería tener Created: %+v", base)
+		}
 		got, err := r.Resolve(ctx, []string{"gym"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("resoluciones = %+v, se esperaba 1", got)
+		if len(got) != 1 || got[0].Topic.Slug != "gym" || got[0].Topic.ID == base[0].Topic.ID ||
+			got[0].Equivalent || got[0].Requested != "gym" || !got[0].Created {
+			t.Errorf("resolución = %+v, se esperaba un tema gym propio, sin Equivalent y con Created", got)
 		}
-		if got[0].Topic != base[0].Topic || !got[0].Equivalent || got[0].Requested != "gym" {
-			t.Errorf("resolución = %+v, se esperaba entrenamiento con Equivalent y Requested=gym", got[0])
-		}
-		if n := countTopics(t, ctx); n != 1 {
-			t.Errorf("hay %d temas, se esperaba 1 (no se debe crear 'gym')", n)
+		if n := countTopics(t, ctx); n != 2 {
+			t.Errorf("hay %d temas, se esperaba 2", n)
 		}
 
-		// Con una caché recién cargada de la base de datos (media precisión) sigue funcionando.
+		// Con una caché recién cargada de la base de datos tampoco se fusiona.
 		r2 := NewResolver(tc.Pool, fake, testThreshold)
 		if err := r2.Load(ctx); err != nil {
 			t.Fatal(err)
 		}
-		got, err = r2.Resolve(ctx, []string{"gym"})
+		again, err := r2.Resolve(ctx, []string{"gym", "entrenamiento"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].Topic != base[0].Topic || !got[0].Equivalent {
-			t.Errorf("tras Load, resolución = %+v, se esperaba entrenamiento equivalente", got)
+		if len(again) != 2 || again[0].Topic != got[0].Topic || again[0].Equivalent || again[0].Created ||
+			again[1].Topic != base[0].Topic || again[1].Equivalent || again[1].Created {
+			t.Errorf("tras Load, resolución = %+v, se esperaba reutilizar gym y entrenamiento sin Created", again)
+		}
+	})
+
+	run("S2 a slug equal to an existing one without hyphens resolves to it", func(t *testing.T, ctx context.Context) {
+		r := NewResolver(tc.Pool, fake, testThreshold)
+		base, err := r.Resolve(ctx, []string{"coche-4860ngl"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := r.Resolve(ctx, []string{"coche-4860-ngl"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Topic != base[0].Topic || !got[0].Equivalent ||
+			got[0].Requested != "coche-4860-ngl" || got[0].Created {
+			t.Errorf("resolución = %+v, se esperaba coche-4860ngl con Equivalent y Requested=coche-4860-ngl", got)
+		}
+		if n := countTopics(t, ctx); n != 1 {
+			t.Errorf("hay %d temas, se esperaba 1", n)
 		}
 	})
 
@@ -231,11 +252,11 @@ func TestResolver(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].Topic.Slug != "entrenamiento" || got[0].Equivalent {
-			t.Fatalf("resoluciones = %+v, se esperaba solo 'entrenamiento'", got)
+		if len(got) != 2 || got[0].Topic.Slug != "entrenamiento" || got[1].Topic.Slug != "gym" || got[0].Equivalent || got[1].Equivalent {
+			t.Fatalf("resoluciones = %+v, se esperaba 'entrenamiento' y 'gym' sin repetir", got)
 		}
-		if n := countTopics(t, ctx); n != 1 {
-			t.Errorf("hay %d temas, se esperaba 1", n)
+		if n := countTopics(t, ctx); n != 2 {
+			t.Errorf("hay %d temas, se esperaba 2", n)
 		}
 	})
 

@@ -10,6 +10,9 @@ Memoria persistente local para asistentes de IA. Guarda decisiones, preferencias
 - [Uso básico](#uso-básico)
 - [Comandos CLI](#comandos-cli)
 - [Backup y Restauración](#backup-y-restauración)
+- [Sincronización entre máquinas](#sincronización-entre-máquinas)
+- [Instalación en otro equipo y sincronización](#instalación-en-otro-equipo-y-sincronización)
+- [Hooks de los clientes de IA](#hooks-de-los-clientes-de-ia)
 - [Documentación técnica](#documentación-técnica)
 - [Arquitectura](#arquitectura)
 - [Estado del proyecto](#estado-del-proyecto)
@@ -165,11 +168,14 @@ No hay comandos de terminal para guardar o recuperar: tú hablas en lenguaje nat
 
 | Tú dices | La IA usa |
 | :--- | :--- |
-| «Entreno por la tarde» o «hemos decidido usar Postgres» | `remember`: guarda un registro con título, contenido, tipo y temas |
-| «Recuérdame qué decidimos sobre la base de datos» | `recall`: recupera la ficha del tema, los últimos eventos y los resultados |
+| «Entreno por la tarde» o «hemos decidido usar Postgres» | `remember`: guarda un registro con título, contenido, tipo y etiquetas (generales como `#agridemur` y concretas como `#coche-4860ngl`) |
+| «Antes de guardarlo, revísalo» | `remember` con `preview: true`: corre todas las comprobaciones sin guardar nada (etiquetas, duplicado, clave, alias, conectados, `revisa:`) |
+| «Recuérdame qué decidimos sobre la base de datos» | `recall`: recupera la ficha del tema, los últimos eventos, los resultados y lo conectado por etiquetas |
 | «¿De qué hablamos la última vez?» | `session` con `action: last` |
 | «Esa decisión ya no vale» | `revise` con `action: invalidate` (o `supersede` si la sustituye otra) |
-| «Bórralo definitivamente» | `revise` con `action: delete` y `confirm: true` |
+| «AGM y Agridemur son lo mismo» | `revise` con `action: alias` y `tag`+`with_tag`: el servidor lo aplica solo a partir de ahora |
+| «Esos dos coches no son el mismo» | `revise` con `action: reject_alias` |
+| «Esto es un duplicado, junta los dos» | `revise` con `action: merge`: primero vista previa (sin `confirm`), luego `confirm: true` con la huella que devolvió la vista previa |
 | (al terminar la conversación) | `session` con `action: end` y un resumen breve |
 | «¿Está funcionando lodan?» | `status` |
 
@@ -194,6 +200,7 @@ lodan lee `config.json` de la carpeta de datos; las variables de entorno `LODAN_
 | Dirección HTTP de `serve --http` | `127.0.0.1:7438` | `LODAN_HTTP_ADDR` |
 | Tope de una respuesta de `recall` | 6000 bytes | `LODAN_RECALL_MAX_BYTES` |
 | Minutos de inactividad que cierran una sesión | 30 | `LODAN_SESSION_IDLE_MINUTES` |
+| Minutos entre sincronizaciones de la tarea de `lodan sync schedule` (`sync_interval_minutes`; 0 = sin tarea) | 0 | `LODAN_SYNC_INTERVAL_MINUTES` |
 
 El resto de ajustes (carpeta de binarios de PostgreSQL, umbrales de duplicados y de temas, tiempos del embedding) están en [`internal/config/config.go`](internal/config/config.go).
 
@@ -213,6 +220,8 @@ Todos los subcomandos aceptan `-h` para mostrar sus opciones (`lodan <subcomando
 | `doctor` | Diagnostica la instalación, con una línea por comprobación | `./lodan doctor` |
 | `uninstall` | Desinstala lodan; los datos se conservan salvo con `--purge`. Opciones: `--yes`, `--dry-run`, `--purge` | `./lodan uninstall --purge` |
 | `service` | Gestiona el servicio de sistema: `start`, `stop`, `restart`, `enable`, `disable`, `status` (cada uno con `--name`, por defecto `lodan`) | `./lodan service status` |
+| `sync` | Sincroniza la memoria con otras máquinas por git, cifrada: `init --repo <url> [--key <fichero>] [--machine <id>]`, `push`, `pull`, `run`, `schedule [--every <minutos>]`, `unschedule` | `./lodan sync pull` |
+| `hook` | Hooks de los clientes de IA: `compact`, `subagent-stop` (con `--client <nombre>`; leen el evento por la entrada estándar y siempre salen con 0) | `./lodan hook compact --client claude-code` |
 | `bench` | Ejecuta el benchmark sobre la base `lodan_bench`. Opciones: `--rows`, `--candidates`, `--reuse`, `--queries`, `--out`, `--seed`, `--embed-queries` | `./lodan bench --rows 10000,100000` |
 
 Notas:
@@ -288,6 +297,87 @@ La gestión automática de retención (eliminar backups antiguos) se implementar
 
 ---
 
+## Sincronización entre máquinas
+
+`lodan sync` lleva la memoria de una máquina a las demás a través de un repositorio git privado, sin perder ni duplicar nada. Cada máquina escribe solo en su carpeta `changes/<máquina>/` del repositorio, así que git nunca tiene que fusionar un fichero.
+
+- **Qué viaja**: registros, relaciones, sesiones, alias del diccionario (confirmados y rechazados; las sugerencias se quedan locales) y borrados creados o cambiados desde el último envío, en un fichero por envío (`changes/<máquina>/<fecha UTC>-<n>.jsonl.age`). Cada registro viaja con un identificador global (`sync_id`); los ids locales (`#123`) no salen de la máquina y pueden ser distintos en cada una. Las líneas de relación llevan el veredicto y la confianza (`verdict`, `confidence`) cuando están aplicados o pendientes. Los alias son last-write-wins por `updated_at`: el más reciente gana; cuando entra un alias `confirmed` reetiqueta los records locales que tenían la etiqueta original.
+- **Qué no viaja**: los embeddings (cada máquina los recalcula), `config.json`, `secret`, la clave y las sugerencias de alias.
+- **Formato**: los ficheros sin líneas de alias usan el formato `lodan-sync/1`; los que llevan al menos un alias usan `lodan-sync/2`. El reader acepta ambos.
+- **Cifrado**: los ficheros se cifran con [age](https://age-encryption.org) (X25519, librería `filippo.io/age`). En el repositorio solo hay contenido ilegible.
+
+### Reglas de fusión
+
+| Caso | Resultado en todas las máquinas |
+| :--- | :--- |
+| Registro nuevo | Se crea igual, con sus temas, sesión y fechas |
+| Sustituido o invalidado en una máquina | Queda sustituido o invalidado también en las demás; nunca se reactiva |
+| Editado en una máquina sobre la versión de la otra | La edición sustituye a la versión anterior |
+| Editado en las dos sin haber visto la otra edición | Gana la edición más reciente; la otra queda como versión sustituida (historial) |
+| Dos registros vigentes con la misma `key` | Los dos siguen vigentes, la clave se la queda el más reciente, se relacionan como `contradicts` y `lodan sync pull` te pide que decidas cuál vale |
+| El mismo contenido creado en las dos | Queda un solo registro |
+| Borrado en una máquina | Se borra en todas; el borrado gana a cualquier edición |
+
+### Primera máquina
+
+```bash
+lodan sync init --repo git@github.com:<usuario>/lodan-sync.git
+lodan sync push
+```
+
+`init` clona el repositorio en `<datos>/sync-repo`, crea la clave si no existe (nunca la sobrescribe) y guarda `sync_repo`, `sync_machine` y `sync_key_file` en `config.json`. La clave se guarda por defecto en la carpeta de configuración del usuario (`%APPDATA%\lodan\sync.key` en Windows, `~/.config/lodan/sync.key` en Linux), fuera de la carpeta de datos, para que los backups de lodan no la lleven. git usa tu configuración y tus credenciales de siempre: lodan no guarda ninguna.
+
+### La clave
+
+> **Guarda una copia de la clave fuera del equipo** (por ejemplo, en tu gestor de contraseñas). Sin ella, el contenido del repositorio no se puede recuperar: nadie, tampoco lodan, puede descifrarlo.
+
+El fichero de la clave tiene una línea `AGE-SECRET-KEY-1…`. Para otra máquina, copia el fichero entero por un canal privado (gestor de contraseñas, USB), nunca por el repositorio.
+
+### Segunda máquina
+
+1. Instala lodan (`lodan install`).
+2. Copia la clave a la ruta por defecto de esa máquina (o indica otra con `--key`).
+3. Ejecuta:
+
+```bash
+lodan sync init --repo git@github.com:<usuario>/lodan-sync.git
+lodan sync pull
+lodan sync push
+```
+
+### Uso diario y sincronización automática
+
+- `lodan sync push`: envía los cambios locales.
+- `lodan sync pull`: trae e importa los cambios de las otras máquinas y muestra las contradicciones que tienes que resolver.
+- `lodan sync run`: `push` y después `pull`.
+- `lodan sync schedule [--every 15]`: crea una tarea **de tu usuario** que ejecuta `lodan sync run` cada 15 minutos (de 5 a 1440) con tus credenciales de git, y guarda el intervalo en `sync_interval_minutes`. En Windows es la tarea `lodan-sync` del Programador de tareas (solo con la sesión iniciada, sin administrador, sin ventana gracias a `conhost.exe --headless`); en Linux, el timer `lodan-sync.timer` de `systemd --user`; en macOS, el LaunchAgent `com.lodan.sync`. `lodan sync unschedule` la quita. Lo que imprimen `push`, `pull` y `run` (también la tarea y el pull de inicio de sesión, que no tienen consola) se guarda en `<datos>/logs/sync.log`. No la hace el servicio de lodan porque corre con otra cuenta (LocalSystem o root), que no tiene tus credenciales de git.
+- Además, al empezar cada sesión de IA el hook `lodan hook session-start` hace un `pull` (ver [Hooks](#hooks-de-los-clientes-de-ia)).
+
+---
+
+## Hooks de los clientes de IA
+
+Automatismos que no dependen de la disciplina de la IA. Los ejecuta el cliente en eventos de su ciclo de vida; leen el JSON del evento por la entrada estándar, nunca arrancan PostgreSQL y siempre salen con código 0, así que si lodan no está disponible la IA sigue sin más.
+
+| Comando | Evento | Qué hace |
+| :--- | :--- | :--- |
+| `lodan hook compact --client <nombre>` | Justo después de compactar el contexto | Escribe las instrucciones de recuperación (llamar a `recall` en lote con los temas en curso) y el resumen de la última sesión de lodan de ese cliente |
+| `lodan hook compact --client <nombre>` | `PostCompact` (con `compact_summary`) | Guarda el resumen de la compactación en la sesión abierta del cliente, sin cerrarla |
+| `lodan hook session-start --client <nombre>` | Al empezar una sesión | Si la sincronización está configurada, trae los cambios de las otras máquinas (`lodan sync pull`) |
+| `lodan hook subagent-stop --client <nombre>` | Fin de un subagente | Guarda cada punto del bloque `## Key Learnings` de su informe (máximo 5) como `note` en el tema del proyecto (la carpeta raíz del repositorio git). Descarta lo que parezca un secreto o un DNI/NIE |
+
+`--client` debe ser el nombre con el que el cliente se presenta por MCP (`claude-code`, `opencode`, `antigravity-client`), para que el resumen sea el de sus sesiones.
+
+`lodan install` los registra en cada cliente instalado, sin tocar los hooks que ya tengas (y `lodan uninstall` los quita; `lodan doctor` comprueba que están):
+
+| Cliente | Dónde | Qué se registra | Qué no se puede |
+| :--- | :--- | :--- | :--- |
+| Claude Code | `~/.claude/settings.json` | `SessionStart` (matcher `startup\|resume\|clear`) → `hook session-start`; `SessionStart` (matcher `compact`) y `PostCompact` → `hook compact`; `SubagentStop` y `PostToolUse` sobre `SubagentHandback` → `hook subagent-stop` | — |
+| opencode 2.x | `~/.config/opencode/plugins/lodan.js` | Plugin v2: al crear una sesión hace `hook session-start`; al terminar una compactación guarda el resumen e inyecta las instrucciones; al terminar un subagente (herramienta `subagent`, también en segundo plano) guarda sus Key Learnings | Si el proveedor compacta por su cuenta (compactación nativa), no hay resumen que guardar |
+| Antigravity | `~/.gemini/config/hooks.json` (grupo `lodan`) | `SessionStart` → `hook compact --format antigravity` (al empezar una conversación inyecta las instrucciones y el resumen de la última sesión) y `hook session-start --format antigravity` (pull) | Antigravity no tiene evento de compactación ni de fin de subagente: no se simulan |
+
+---
+
 ## Documentación técnica
 
 La documentación técnica completa está en [`specs/PRD.md`](specs/PRD.md):
@@ -303,14 +393,14 @@ También ver [`CODEBASE.md`](CODEBASE.md) para el stack con sus versiones y el e
 
 lodan expone **máximo 6 herramientas** vía MCP (stdio o HTTP streamable):
 
-1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota). Deduplica, resuelve los temas y avisa de parecidos.
-2. **`recall`** — Recupera lo relevante para una pregunta en lenguaje natural: ficha del tema, últimos eventos y resultados.
-3. **`get`** — Devuelve el contenido completo y las relaciones de registros concretos por id.
-4. **`revise`** — Cambia un registro: `update`, `supersede`, `invalidate`, `delete` (definitivo, con `confirm`) o gestiona relaciones (`relate`, `confirm_relation`, `reject_relation`).
-5. **`session`** — Consulta o cierra conversaciones: `last` (la última; filtrable por tema, cliente o fecha), `list` y `end` (cierra la actual con un resumen).
-6. **`status`** — Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones y Ollama.
+1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota) con etiquetas (`tags`/`topics`, juntas, máx. 8: generales como `#agridemur` y concretas como `#coche-4860ngl`). Deduplica, resuelve las etiquetas y los alias confirmados, crea las relaciones pedidas con `relate` y, debajo de cada registro, lista con `revisa:` hasta 6 registros que la IA debe comprobar por si lo contradicen o se relacionan: los de las mismas etiquetas (aunque no se parezcan), los que comparten alguna palabra y los cercanos en significado. El servidor no crea relaciones solo por parecido; las etiquetas nuevas parecidas a otras se guardan como están y aparecen como `¿alias?` para que la IA las confirme. Con `preview: true`, corre todas las comprobaciones sin guardar nada.
+2. **`recall`** — Recupera lo relevante para una o varias preguntas (`queries`) en lenguaje natural: ficha del tema, últimos eventos y resultados, en un bloque por pregunta; al final, los registros conectados por las etiquetas concretas del primer resultado (ranking por rareza: `Σ ln(N/n)`, umbral `tag_link_strength` por defecto 3.0).
+3. **`get`** — Devuelve el contenido completo, las etiquetas, la clave y las relaciones de registros concretos por id.
+4. **`revise`** — Cambia uno o varios registros (`ops`): `update`, `supersede`, `invalidate`, `delete` (definitivo, con `confirm`); gestiona relaciones (`relate`, `confirm_relation`, `reject_relation`); aplica alias (`alias`, `reject_alias`); guarda veredictos sobre conflictos con su confianza (`verdict`: `contradice`/`sustituye`/`compatible`/`no_relacionado`; ≥ 0.7 aplica, < 0.7 queda pendiente); o junta ≥ 2 registros en uno nuevo (`merge`, siempre con vista previa antes de `confirm: true` y `fingerprint`).
+5. **`session`** — Consulta o cierra conversaciones, una o varias operaciones (`ops`): `last` (la última; filtrable por tema, cliente o fecha), `list` y `end` (cierra la actual con un resumen).
+6. **`status`** — Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones, Ollama, alias confirmados y pendientes, veredictos pendientes y contradicciones abiertas.
 
-Cada respuesta es texto compacto (sin JSON verboso), con tope de tamaño, y optimizada para tokens. Los parámetros de cada herramienta están en [`skills/lodan-memoria/references/herramientas.md`](skills/lodan-memoria/references/herramientas.md).
+Todas las herramientas que reciben operaciones aceptan lotes, con un mismo tope de seguridad de 200 por llamada; un lote de `recall` calcula los embeddings de golpe y resuelve las búsquedas en paralelo. `recall`, `get` y `status` se declaran de solo lectura (`readOnlyHint`) para que los clientes puedan lanzarlas a la vez. Cada respuesta es texto compacto (sin JSON verboso), con tope de tamaño, y optimizada para tokens. Los parámetros de cada herramienta están en [`skills/lodan-memoria/references/herramientas.md`](skills/lodan-memoria/references/herramientas.md).
 
 ### Búsqueda
 
@@ -401,6 +491,7 @@ Fuente: [`specs/001-nucleo-memoria/benchmark.md`](specs/001-nucleo-memoria/bench
 | 001 · Núcleo de memoria | [`specs/001-nucleo-memoria/verificacion.md`](specs/001-nucleo-memoria/verificacion.md): criterios cumplidos salvo el rendimiento a 10 millones (arriba) |
 | 002 · Instalador | [`specs/002-instalador/verificacion.md`](specs/002-instalador/verificacion.md): parcial en servicios (Windows y macOS) y en desinstalación con servicios, como indica la tabla de plataformas. La espera a Ollama ampliada a 3 min no se ha vuelto a probar desde cero |
 | 003 · Backup seguro | [`specs/003-backup-seguro/verificacion.md`](specs/003-backup-seguro/verificacion.md): criterios de aceptación cumplidos en Linux, incluida la convivencia con el servicio |
+| 004 · Hashtags y calidad (rama `feat/hashtags-calidad`, **pendiente de merge a `dev`**) | Implementada y desplegada en el equipo principal (binario del 2026-10-18). Cubre: 6 herramientas MCP actualizadas (tags y alias en `remember`, alias/verdict/alias-reject en `revise`, `merge` con vista previa y huella de 8 hex); skill `lodan-memoria 3.0.0` (tag families, preview, alias, verdict, merge, key `<etiqueta concreta>/<atributo>`); relación por rareza `Σ ln(N/n)` con umbral `tag_link_strength` configurable; sync con `lodan-sync/2` (aliases y verdicts viajan en el batch file); seed con 2 alias confirmados (`agm → agridemur`, `agm-repo → lodan-memoria`) y 39/39 contradicciones resueltas. Más detalle en [`odd/tasks/hashtags-y-calidad.md`](odd/tasks/hashtags-y-calidad.md) |
 
 ---
 
@@ -408,7 +499,7 @@ Fuente: [`specs/001-nucleo-memoria/benchmark.md`](specs/001-nucleo-memoria/bench
 
 ```
 lodan/
-├── cmd/lodan/              # CLI principal (serve, db, migrate, status, install, doctor, uninstall, service, bench)
+├── cmd/lodan/              # CLI principal (serve, db, migrate, status, install, doctor, uninstall, service, bench, sync, hook)
 ├── internal/
 │   ├── memory/             # Guardar y revisar registros (remember, get, revise)
 │   ├── recall/             # Búsqueda por tema (recall)
@@ -418,6 +509,8 @@ lodan/
 │   ├── mcptools/           # Herramientas MCP y transportes stdio y HTTP
 │   ├── benchmark/          # Benchmark reproducible (lodan bench)
 │   ├── install/            # Instalador, doctor y desinstalador (clientes MCP, skill, Ollama, PostgreSQL)
+│   ├── gitsync/            # Sincronización cifrada entre máquinas por git (lodan sync)
+│   ├── hook/               # Hooks de los clientes de IA (lodan hook)
 │   ├── service/            # Supervisor del servicio y gestores de servicio por sistema operativo
 │   ├── database/           # Clúster de PostgreSQL, pool, migraciones, backup y restauración
 │   └── config/             # Configuración (puertos, rutas, variables LODAN_*)
@@ -447,6 +540,148 @@ Este es un proyecto personal. Las sugerencias, reportes de bugs y PRs se reciben
 
 ---
 
-**Última actualización:** 2026-10-04  
+## Instalación en otro equipo y sincronización
+
+Para tener lodan en un segundo ordenador con la **misma versión del binario** y la **base de datos sincronizada** por git.
+
+### 0. Prerrequisitos en el equipo nuevo
+
+- **Go ≥ 1.25.0** (con `GOTOOLCHAIN=auto` baja toolchain 1.27.1 sola).
+- **git** con acceso por SSH al repo `git@github.com:4ntoniomj/lodan.sync.git` (el mismo repo privado que ya usas; añadir tu clave pública al repo).
+- Sin PostgreSQL ni Ollama: `lodan install` los descarga.
+
+### 1. Clonar el repo en una versión exacta
+
+Clona el repo del binario (`lodaan-memory`, NO `lodan.sync`) y haz checkout al commit que quieras usar. Para una versión estable, una **tag** o el HEAD de una rama estable:
+
+```bash
+git clone https://github.com/4ntoniomj/lodaan-memory.git
+cd lodaan-memory
+git checkout <commit o tag>
+```
+
+Para tener la última estable de esta fecha:
+
+```bash
+git checkout main   # o la rama que Antonio indique tras el merge
+```
+
+### 2. Compilar el binario
+
+```bash
+go build -o lodan.exe ./cmd/lodan    # Windows
+# o
+go build -o lodan ./cmd/lodan       # Linux/macOS
+```
+
+Verifica el SHA-256 del binario con el del equipo original:
+
+```bash
+sha256sum lodan.exe   # Linux/macOS
+certutil -hashfile lodan.exe SHA256   # Windows
+```
+
+Coincide con el hash del binario instalado en el otro equipo (`C:\Users\4ntoniomj\AppData\Local\lodan\bin\lodan.exe` o el equivalente).
+
+### 3. Instalar lodan en el equipo nuevo
+
+```bash
+./lodan install --yes
+```
+
+Esto descarga PostgreSQL y Ollama si hace falta, crea el clúster local, aplica las migraciones, registra el servicio `lodan` y configura los clientes MCP que detecte (Claude Code, opencode, Antigravity, etc.). Si ya tenías una instalación previa en esa máquina, `--skip-ollama --skip-service --skip-clients` reutiliza lo que ya estaba al día.
+
+Tras la instalación, verifica:
+
+```bash
+./lodan doctor    # 14/14 ok, 0 errores, 0 avisos
+./lodan status
+```
+
+### 4. Copiar la clave de sync desde el equipo original
+
+La clave de cifrado de los ficheros de sync (X25519 de `age`) **se queda en una sola máquina** y se copia al nuevo equipo por un canal seguro (gestor de contraseñas, USB). **Nunca va al repositorio git**.
+
+En el equipo original:
+
+```bash
+lodan doctor    # muestra la ruta: por defecto C:\Users\4ntoniomj\AppData\Roaming\lodan\sync.key (Windows) o ~/.config/lodan/sync.key (Linux)
+```
+
+El fichero tiene una sola línea: `AGE-SECRET-KEY-1…`. Cópiala al equipo nuevo en la misma ruta (o usa `--key <ruta>` al inicializar).
+
+### 5. Inicializar el sync en el equipo nuevo
+
+```bash
+./lodan sync init --repo git@github.com:4ntoniomj/lodan.sync.git --machine <id-unico>
+```
+
+El `--machine` es el identificador de esta máquina en la sincronización (cada máquina escribe en su propia carpeta `changes/<machine>/`). Ejemplos: `pc-portatil`, `servidor-casa`, `oficina`. Tiene que ser distinto al del equipo original.
+
+`init` clona el repo de sync en `<datos>/sync-repo`, guarda la ruta, el id de máquina y la ruta de la clave en `config.json`. Si ya existe la clave en la ruta esperada, la reutiliza.
+
+### 6. Traer los datos del otro equipo
+
+```bash
+./lodan sync pull
+```
+
+Aplica los ficheros cifrados del otro equipo: crea los registros, alias, relaciones y veredictos que ya tienes. Las contradicciones y registros ya resueltos en el otro equipo **no reaparecen** porque el formato `/2` lleva `verdict` y `confidence` y la re-tiqueta automática de alias funciona out-of-the-box.
+
+### 7. Mandar tus primeros cambios y programar el sync
+
+```bash
+./lodan sync push             # envía tus primeros cambios locales al repo
+./lodan sync schedule --every 15   # tarea de tu usuario: push+pull cada 15 minutos
+```
+
+Con `--every 15` se crea (sin admin):
+- **Windows**: tarea programada `lodan-sync` que corre solo con tu sesión iniciada.
+- **Linux**: timer `lodan-sync.timer` de `systemd --user`.
+- **macOS**: LaunchAgent `com.lodan.sync`.
+
+Logs en `<datos>/logs/sync.log`. La tarea corre con tus credenciales de git (no las del servicio `lodan`, que va con LocalSystem).
+
+### 8. Configurar los hooks de los clientes MCP
+
+Si quieres que los clientes (Claude Code, opencode, Antigravity) también tengan la skill `lodan-memoria 3.0.0` y los hooks:
+
+```bash
+./lodan install --only <cliente>    # repetir por cliente
+```
+
+O más agresivo (recomendado tras sync inicial):
+
+```bash
+./lodan install --yes --skip-ollama --skip-service --skip-postgresql
+```
+
+Verifica con `./lodan doctor` que la skill está al día en `~/.claude/skills/lodan-memoria` (o la ruta equivalente del cliente).
+
+### Resumen rápido (TL;DR)
+
+```bash
+# En el equipo original:
+sha256sum lodan.exe > lodan.exe.sha256    # anota el hash para comparar
+lodan sync schedule --every 15            # asegúrate de que el sync sigue corriendo
+
+# En el equipo nuevo:
+git clone https://github.com/4ntoniomj/lodaan-memory.git
+cd lodaan-memory && git checkout <commit>
+go build -o lodan.exe ./cmd/lodan
+sha256sum lodan.exe     # debe coincidir con el original
+./lodan install --yes
+# (copia sync.key desde el original)
+./lodan sync init --repo git@github.com:4ntoniomj/lodan.sync.git --machine <id>
+./lodan sync pull
+./lodan sync push
+./lodan sync schedule --every 15
+./lodan doctor    # 14/14 ok
+```
+
+---
+
+**Última actualización:** 2026-10-18  
+**Rama principal:** `dev` (la nueva versión estable `feat/hashtags-calidad` está lista para merge; main no existe en el repo, ver `Estado del proyecto`)
 **Repositorio:** https://github.com/4ntoniomj/lodaan-memory  
 **Autor:** Antonio (con Claude como orquestador)

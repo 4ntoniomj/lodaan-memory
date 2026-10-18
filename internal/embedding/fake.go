@@ -70,6 +70,21 @@ func (f *FakeEmbedder) EmbedQuery(ctx context.Context, q string) ([]float32, err
 	return f.embedText(q), nil
 }
 
+// EmbedQueries embeds several queries, in order.
+func (f *FakeEmbedder) EmbedQueries(ctx context.Context, qs []string) ([][]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(qs) == 0 {
+		return nil, nil
+	}
+	out := make([][]float32, len(qs))
+	for i, q := range qs {
+		out[i] = f.embedText(q)
+	}
+	return out, nil
+}
+
 func (f *FakeEmbedder) embedText(text string) []float32 {
 	dims := f.Dims()
 	v := make([]float32, dims)

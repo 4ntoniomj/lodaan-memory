@@ -36,6 +36,8 @@ type Resolution struct {
 	// Equivalent is true when the request was mapped to an existing topic
 	// different from the requested one.
 	Equivalent bool
+	// Created is true when this call created the topic.
+	Created bool
 }
 
 // cached is a topic with its embedding, as kept in memory.
@@ -45,7 +47,8 @@ type cached struct {
 }
 
 // Resolver resolves topic names against the database, keeping an in-memory
-// cache of topics and their embeddings to detect equivalents without queries.
+// cache of topics and their embeddings to detect the topic of a query without
+// queries.
 // It is safe for concurrent use.
 type Resolver struct {
 	pool      *pgxpool.Pool
@@ -58,8 +61,8 @@ type Resolver struct {
 	loadedAt time.Time
 }
 
-// NewResolver creates a Resolver. Two topics are considered equivalent when the
-// cosine similarity of their embeddings is at least threshold. The cache starts
+// NewResolver creates a Resolver. threshold is the cosine similarity Detect
+// needs to report a topic; resolving never merges topics by similarity. The cache starts
 // empty: call Load, or let Resolve load it when it is first needed.
 func NewResolver(pool *pgxpool.Pool, emb embedding.Embedder, threshold float64) *Resolver {
 	return &Resolver{
@@ -204,7 +207,30 @@ func (r *Resolver) ResolveWithin(ctx context.Context, raw []string, embedTimeout
 
 // resolveOne resolves a single normalized, non-empty slug. A non-zero
 // embedDeadline limits the time spent embedding it (see embedSlug).
+//
+// A slug is never mapped to a different topic just because their meanings are
+// close: two concrete tags such as two license plates embed almost the same and
+// must stay apart. Only a confirmed alias, or a slug equal to an existing one
+// once every "-" is removed, resolves to another topic.
 func (r *Resolver) resolveOne(ctx context.Context, slug string, embedDeadline time.Time) (Resolution, error) {
+	// 0. Alias confirmado: se resuelve su etiqueta canónica.
+	canonical, isAlias, err := r.Canonical(ctx, slug)
+	if err != nil {
+		return Resolution{}, err
+	}
+	if isAlias {
+		res, err := r.resolveSlug(ctx, canonical, embedDeadline)
+		if err != nil {
+			return Resolution{}, err
+		}
+		res.Requested, res.Equivalent = slug, res.Topic.Slug != slug
+		return res, nil
+	}
+	return r.resolveSlug(ctx, slug, embedDeadline)
+}
+
+// resolveSlug resolves slug without looking at the alias dictionary.
+func (r *Resolver) resolveSlug(ctx context.Context, slug string, embedDeadline time.Time) (Resolution, error) {
 	// 1. Existe: se usa tal cual y se marca como usado.
 	var id int32
 	err := r.pool.QueryRow(ctx,
@@ -216,51 +242,40 @@ func (r *Resolver) resolveOne(ctx context.Context, slug string, embedDeadline ti
 		return Resolution{}, fmt.Errorf("no se pudo buscar el tema %q: %w", slug, err)
 	}
 
-	// 2. No existe: se calcula su embedding.
+	// 2. Existe escrito con otros guiones: se usa el existente.
+	var existing string
+	err = r.pool.QueryRow(ctx,
+		`UPDATE topics SET last_used_at = now()
+		 WHERE id = (SELECT id FROM topics WHERE replace(slug, '-', '') = replace($1, '-', '') ORDER BY id LIMIT 1)
+		 RETURNING id, slug`, slug).Scan(&id, &existing)
+	if err == nil {
+		return Resolution{Topic: Topic{ID: id, Slug: existing}, Requested: slug, Equivalent: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Resolution{}, fmt.Errorf("no se pudo buscar el tema %q: %w", slug, err)
+	}
+
+	// 3. No existe: se crea con su embedding (o se reutiliza si otro proceso lo creó a la vez).
 	vec, err := r.embedSlug(ctx, slug, embedDeadline)
 	if err != nil {
 		return Resolution{}, err
 	}
-
-	// 2a. Con embedding, se busca un tema equivalente en la caché.
-	if vec != nil {
-		if err := r.loadIfStale(ctx); err != nil {
-			return Resolution{}, err
-		}
-		if best, sim, found := r.nearest(vec); found && sim >= r.threshold {
-			var bestID int32
-			err := r.pool.QueryRow(ctx,
-				`UPDATE topics SET last_used_at = now() WHERE id = $1 RETURNING id`, best.ID).Scan(&bestID)
-			switch {
-			case err == nil:
-				return Resolution{Topic: best, Requested: slug, Equivalent: best.Slug != slug}, nil
-			case errors.Is(err, pgx.ErrNoRows):
-				// El tema de la caché ya no existe: se recarga y se crea el pedido.
-				if err := r.Load(ctx); err != nil {
-					return Resolution{}, err
-				}
-			default:
-				return Resolution{}, fmt.Errorf("no se pudo actualizar el tema %q: %w", best.Slug, err)
-			}
-		}
-	}
-
-	// 2b. Sin equivalente: se crea (o se reutiliza si otro proceso lo creó a la vez).
 	var param any // nil se guarda como NULL: embedding pendiente
 	if vec != nil {
 		param = pgvector.NewHalfVector(vec)
 	}
+	var inserted bool
 	err = r.pool.QueryRow(ctx,
 		`INSERT INTO topics (slug, embedding) VALUES ($1, $2)
 		 ON CONFLICT (slug) DO UPDATE
 		   SET last_used_at = now(), embedding = COALESCE(topics.embedding, EXCLUDED.embedding)
-		 RETURNING id`, slug, param).Scan(&id)
+		 RETURNING id, (xmax = 0)`, slug, param).Scan(&id, &inserted)
 	if err != nil {
 		return Resolution{}, fmt.Errorf("no se pudo crear el tema %q: %w", slug, err)
 	}
 	t := Topic{ID: id, Slug: slug}
 	r.cacheSet(t, vec)
-	return Resolution{Topic: t, Requested: slug}, nil
+	return Resolution{Topic: t, Requested: slug, Created: inserted}, nil
 }
 
 // embedSlug computes the embedding of a slug. It returns a nil vector, and no

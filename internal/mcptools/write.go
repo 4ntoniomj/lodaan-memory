@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,20 +10,31 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"lodan/internal/memory"
+	"lodan/internal/recall"
+	"lodan/internal/topic"
 )
 
 // rememberInput is the input of the remember tool.
 type rememberInput struct {
-	Items []rememberItem `json:"items" jsonschema:"Registros a guardar (1-20)"`
+	Items   []rememberItem `json:"items" jsonschema:"Registros a guardar (1-200)"`
+	Preview bool           `json:"preview,omitempty" jsonschema:"true: comprueba todo (etiquetas, alias, duplicados, clave, conexiones, revisa) sin guardar nada"`
 }
 
 type rememberItem struct {
-	Title      string   `json:"title" jsonschema:"Título corto"`
-	Content    string   `json:"content" jsonschema:"Contenido autosuficiente"`
-	Kind       string   `json:"kind" jsonschema:"Tipo de registro"`
-	Topics     []string `json:"topics,omitempty" jsonschema:"1-3 temas libres; reutiliza los existentes"`
-	Key        string   `json:"key,omitempty" jsonschema:"Clave de un dato que cambia; sustituye al vigente con la misma clave"`
-	OccurredAt string   `json:"occurred_at,omitempty" jsonschema:"Cuándo ocurrió: RFC3339 o AAAA-MM-DD, hora local (por defecto, ahora)"`
+	Title      string        `json:"title" jsonschema:"Título corto"`
+	Content    string        `json:"content" jsonschema:"Contenido autosuficiente"`
+	Kind       string        `json:"kind" jsonschema:"Tipo de registro"`
+	Tags       []string      `json:"tags,omitempty" jsonschema:"Etiquetas (máx. 8): generales (#agridemur) y concretas (#coche-1234abc); reutiliza las existentes"`
+	Topics     []string      `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
+	Key        string        `json:"key,omitempty" jsonschema:"Clave de un dato que cambia; sustituye al vigente con la misma clave"`
+	OccurredAt string        `json:"occurred_at,omitempty" jsonschema:"Cuándo ocurrió: RFC3339 o AAAA-MM-DD, hora local (por defecto, ahora)"`
+	Relate     []relateInput `json:"relate,omitempty" jsonschema:"Registros existentes con los que se relaciona (relación confirmada)"`
+}
+
+// relateInput is a relation requested when saving an item.
+type relateInput struct {
+	ID       int64  `json:"id" jsonschema:"Id del registro existente"`
+	Relation string `json:"relation,omitempty" jsonschema:"related (por defecto), contradicts o part_of"`
 }
 
 func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, in rememberInput) (*mcp.CallToolResult, any, error) {
@@ -36,20 +48,123 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		if err != nil {
 			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
 		}
+		relate := make([]memory.RelateTo, len(it.Relate))
+		for j, r := range it.Relate {
+			relate[j] = memory.RelateTo{ID: r.ID, Kind: r.Relation}
+		}
 		items[i] = memory.Item{
 			Title:      it.Title,
 			Content:    it.Content,
 			Kind:       memory.Kind(it.Kind),
+			Tags:       it.Tags,
 			Topics:     it.Topics,
 			Key:        it.Key,
 			OccurredAt: when,
+			Relate:     relate,
 		}
+	}
+	if in.Preview {
+		return s.preview(ctx, items)
 	}
 	saved, err := s.d.Memory.Remember(ctx, tr, items)
 	if err != nil {
 		return errorResult(err), nil, nil
 	}
-	return textResult(formatSaved(saved)), nil, nil
+	return textResult(formatReviewed(saved, s.extras(ctx, items, saved), s.reviewCandidates(ctx, items, saved))), nil, nil
+}
+
+// savedExtras is what remember reports about a saved item besides its line:
+// the records connected by rare tags and the suggested key.
+type savedExtras struct {
+	links  []recall.Link
+	key    string
+	keyFor int64
+}
+
+// extras finds, for every newly saved item, the active records connected to it
+// by rare tags and, if it has no key, the key of a connected record it would
+// update. The search is best effort: if it fails, there is nothing to report.
+func (s *Server) extras(ctx context.Context, items []memory.Item, saved []memory.Saved) []savedExtras {
+	out := make([]savedExtras, len(saved))
+	for i, sv := range saved {
+		if sv.Duplicate {
+			continue
+		}
+		links, err := s.d.Recall.Connected(ctx, []int64{sv.ID}, nil, maxKeyLinks)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(items[i].Key) == "" {
+			out[i].key, out[i].keyFor = s.suggestKey(ctx, links, sv.Topics, items[i].Title)
+		}
+		out[i].links = links[:min(len(links), maxLinks)]
+	}
+	return out
+}
+
+// suggestKey returns the key of a connected record the item would update, or "".
+func (s *Server) suggestKey(ctx context.Context, links []recall.Link, tags []topic.Resolution, title string) (string, int64) {
+	slugs := make([]string, len(tags))
+	for i, r := range tags {
+		slugs[i] = r.Topic.Slug
+	}
+	key, id, ok, err := s.d.Recall.SuggestKey(ctx, links, slugs, title)
+	if err != nil || !ok {
+		return "", 0
+	}
+	return key, id
+}
+
+const (
+	// maxLinks is the maximum number of connected records listed per item.
+	maxLinks = 5
+	// maxKeyLinks is how many connected records are checked for a suggested key.
+	maxKeyLinks = 200
+)
+
+// formatLinks renders links as "#12 (#tag, 5.3), #8 (#tag, 4.1)".
+func formatLinks(links []recall.Link) string {
+	parts := make([]string, len(links))
+	for i, l := range links {
+		parts[i] = fmt.Sprintf("#%d (#%s, %.1f)", l.ID, l.Tag, l.Strength)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// reviewCandidates finds, for every newly saved item, the existing records it
+// should be checked against (possible contradictions or relations). The search
+// is best effort: if it fails for an item, that item gets no candidates.
+func (s *Server) reviewCandidates(ctx context.Context, items []memory.Item, saved []memory.Saved) [][]recall.Item {
+	// Records saved in this call, and the ones they replaced, are never candidates.
+	var common []int64
+	for _, sv := range saved {
+		if !sv.Duplicate {
+			common = append(common, sv.ID)
+		}
+		common = append(common, sv.Superseded...)
+	}
+	out := make([][]recall.Item, len(saved))
+	for i, sv := range saved {
+		if sv.Duplicate {
+			continue
+		}
+		exclude := append(append([]int64(nil), common...), sv.Related...)
+		topicIDs := make([]int32, len(sv.Topics))
+		for j, r := range sv.Topics {
+			topicIDs[j] = r.Topic.ID
+		}
+		cands, err := s.d.Recall.Candidates(ctx, recall.CandidateRequest{
+			Text:     items[i].Title + " " + items[i].Content,
+			Vector:   sv.Vector,
+			TopicIDs: topicIDs,
+			Exclude:  exclude,
+			Limit:    candidateLimit,
+		})
+		if err == nil {
+			out[i] = cands
+		}
+	}
+	return out
 }
 
 // parseWhen parses an RFC3339 timestamp or a AAAA-MM-DD date (local midnight).
@@ -79,9 +194,31 @@ func parseDay(s string) (*time.Time, error) {
 
 // formatSaved renders one line per saved item.
 func formatSaved(saved []memory.Saved) string {
-	lines := make([]string, len(saved))
+	return formatReviewed(saved, nil, nil)
+}
+
+// formatReviewed renders one line per saved item, each followed by its review
+// candidates ("  revisa: <recall line>"). candidates may be nil.
+func formatReviewed(saved []memory.Saved, extras []savedExtras, candidates [][]recall.Item) string {
+	lines := make([]string, 0, len(saved))
 	for i, sv := range saved {
-		lines[i] = formatOneSaved(sv)
+		lines = append(lines, formatOneSaved(sv))
+		for _, sg := range sv.Suggestions {
+			lines = append(lines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
+		}
+		if i < len(extras) {
+			if extras[i].key != "" {
+				lines = append(lines, fmt.Sprintf("  clave sugerida: %s (sustituiría a #%d)", extras[i].key, extras[i].keyFor))
+			}
+			if len(extras[i].links) > 0 {
+				lines = append(lines, "  conectado por etiquetas: "+formatLinks(extras[i].links))
+			}
+		}
+		if i < len(candidates) {
+			for _, c := range candidates[i] {
+				lines = append(lines, "  revisa: "+c.Line())
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -92,14 +229,7 @@ func formatOneSaved(sv memory.Saved) string {
 	}
 	parts := []string{fmt.Sprintf("#%d guardado", sv.ID)}
 	if len(sv.Topics) > 0 {
-		names := make([]string, len(sv.Topics))
-		for i, r := range sv.Topics {
-			names[i] = r.Topic.Slug
-			if r.Equivalent {
-				names[i] += fmt.Sprintf(" (%s→%s)", r.Requested, r.Topic.Slug)
-			}
-		}
-		parts = append(parts, "temas: "+strings.Join(names, ", "))
+		parts = append(parts, "etiquetas: "+formatTags(sv.Topics))
 	}
 	if sv.Pending {
 		parts = append(parts, "embedding y parecidos pendientes (se calculan en segundo plano)")
@@ -111,43 +241,112 @@ func formatOneSaved(sv memory.Saved) string {
 		}
 		parts = append(parts, "sustituye "+strings.Join(ids, ", "))
 	}
-	if len(sv.Similar) > 0 {
-		sim := make([]string, len(sv.Similar))
-		for i, n := range sv.Similar {
-			sim[i] = fmt.Sprintf("#%d «%s» (%.2f)", n.ID, oneLine(n.Title), n.Similarity)
-		}
-		parts = append(parts, "parecidos: "+strings.Join(sim, ", "))
+	for _, id := range sv.MissingRelations {
+		parts = append(parts, fmt.Sprintf("relación con #%d no creada: no existe", id))
 	}
 	return strings.Join(parts, " · ")
 }
 
-// reviseInput is the input of the revise tool.
+// formatTags renders resolved tags as "#a, #requested→#canonical, #new (nueva)".
+func formatTags(rs []topic.Resolution) string {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = "#" + r.Topic.Slug
+		if r.Equivalent {
+			names[i] = fmt.Sprintf("#%s→#%s", r.Requested, r.Topic.Slug)
+		}
+		if r.Created {
+			names[i] += " (nueva)"
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// reviseInput is the input of the revise tool: one operation in the top-level
+// fields, several in ops, or both (the top-level one goes first).
 type reviseInput struct {
-	ID       int64    `json:"id" jsonschema:"Id del registro"`
-	Action   string   `json:"action" jsonschema:"Acción a aplicar"`
+	ID       int64      `json:"id,omitempty" jsonschema:"Id del registro"`
+	Action   string     `json:"action,omitempty" jsonschema:"Acción a aplicar"`
+	WithID   int64      `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
+	Relation string     `json:"relation,omitempty" jsonschema:"Tipo de relación (por defecto related)"`
+	Title    string     `json:"title,omitempty" jsonschema:"Título nuevo (update) o del registro junto (merge)"`
+	Content  string     `json:"content,omitempty" jsonschema:"Contenido nuevo (update) o del registro junto (merge)"`
+	Tag      string     `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
+	WithTag  string     `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
+	Tags     []string   `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, merge, máx. 8); reemplazan a las actuales en update; en merge son las del registro junto"`
+	Topics   []string   `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
+	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete o el commit de merge"`
+	IDs      []int64    `json:"ids,omitempty" jsonschema:"Registros a juntar (merge, ≥2, en el orden del resultado); id no se usa"`
+	Fingerprint string  `json:"fingerprint,omitempty" jsonschema:"Huella de 8 hex devuelta por la vista previa de merge; obligatoria con confirm en merge"`
+	Ops      []reviseOp `json:"ops,omitempty" jsonschema:"Varias operaciones en una sola llamada (máx. 200 en total), con los mismos campos; se aplican en orden y una que falle no frena las demás"`
+
+	// Verdict and Confidence are the inputs of verdict; Confidence is a
+	// pointer so a missing value can be told apart from 0.
+	Verdict    string   `json:"verdict,omitempty" jsonschema:"Veredicto (verdict): id contradice, sustituye, es compatible o no_relacionado con with_id"`
+	Confidence *float64 `json:"confidence,omitempty" jsonschema:"Confianza del veredicto, de 0 a 1 (verdict); por debajo de 0.7 queda pendiente"`
+}
+
+// reviseOp is one operation of the revise tool.
+type reviseOp struct {
+	ID       int64    `json:"id,omitempty" jsonschema:"Id del registro (no hace falta en alias, reject_alias ni merge)"`
+	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict o merge"`
 	WithID   int64    `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
-	Relation string   `json:"relation,omitempty" jsonschema:"Tipo de relación (por defecto related)"`
-	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
-	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
-	Topics   []string `json:"topics,omitempty" jsonschema:"Temas nuevos (update); reemplazan a los actuales"`
-	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
+	Relation string   `json:"relation,omitempty" jsonschema:"related, contradicts, part_of o supersedes (por defecto related)"`
+	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update) o del registro junto (merge)"`
+	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update) o del registro junto (merge)"`
+	Tag      string   `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
+	WithTag  string   `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, merge, máx. 8)"`
+	Topics   []string `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
+	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete o el commit de merge"`
+	IDs      []int64  `json:"ids,omitempty" jsonschema:"Registros a juntar (merge, ≥2, en el orden del resultado); id no se usa"`
+	Fingerprint string `json:"fingerprint,omitempty" jsonschema:"Huella de 8 hex devuelta por la vista previa de merge; obligatoria con confirm en merge"`
+
+	// Verdict and Confidence are the inputs of verdict; Confidence is a
+	// pointer so a missing value can be told apart from 0.
+	Verdict    string   `json:"verdict,omitempty" jsonschema:"contradice, sustituye, compatible o no_relacionado (verdict)"`
+	Confidence *float64 `json:"confidence,omitempty" jsonschema:"Confianza del veredicto, de 0 a 1 (verdict); por debajo de 0.7 queda pendiente"`
 }
 
 func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in reviseInput) (*mcp.CallToolResult, any, error) {
+	var ops []reviseOp
+	if in.ID != 0 || in.Action != "" || in.Tag != "" || in.WithTag != "" || len(in.IDs) > 0 {
+		ops = append(ops, reviseOp{ID: in.ID, Action: in.Action, WithID: in.WithID, Relation: in.Relation,
+			Title: in.Title, Content: in.Content, Tag: in.Tag, WithTag: in.WithTag, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm,
+			IDs: in.IDs, Fingerprint: in.Fingerprint,
+			Verdict: in.Verdict, Confidence: in.Confidence})
+	}
+	ops = append(ops, in.Ops...)
+	if len(ops) == 0 {
+		return errorResult(errors.New("hay que enviar una operación (id y action) u ops")), nil, nil
+	}
+	if len(ops) > memory.MaxBatch {
+		return errorResult(batchSizeError(len(ops), "operaciones")), nil, nil
+	}
+
 	// Memory.Revise records the activity on the session itself, so no Touch here.
 	tr := s.tracker(req)
-	line, err := s.d.Memory.Revise(ctx, tr, memory.Revision{
-		ID:       in.ID,
-		Action:   in.Action,
-		WithID:   in.WithID,
-		Relation: in.Relation,
-		Title:    in.Title,
-		Content:  in.Content,
-		Topics:   in.Topics,
-		Confirm:  in.Confirm,
-	})
-	if err != nil {
-		return errorResult(err), nil, nil
+	results := make([]opResult, len(ops))
+	for i, op := range ops {
+		line, err := s.d.Memory.Revise(ctx, tr, memory.Revision{
+			ID:       op.ID,
+			Action:   op.Action,
+			WithID:   op.WithID,
+			Relation: op.Relation,
+			Title:    op.Title,
+			Content:  op.Content,
+			Tag:      op.Tag,
+			WithTag:  op.WithTag,
+			Tags:     op.Tags,
+			Topics:   op.Topics,
+			Confirm:  op.Confirm,
+			IDs:      op.IDs,
+			Fingerprint: op.Fingerprint,
+
+			Verdict:    op.Verdict,
+			Confidence: op.Confidence,
+		})
+		results[i] = opResult{text: line, err: err}
 	}
-	return textResult(line), nil, nil
+	return batchResult(results), nil, nil
 }

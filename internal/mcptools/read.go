@@ -13,22 +13,31 @@ import (
 
 // recallInput is the input of the recall tool.
 type recallInput struct {
-	Query          string   `json:"query" jsonschema:"Pregunta o tema en lenguaje natural"`
+	Query          string   `json:"query,omitempty" jsonschema:"Pregunta o tema en lenguaje natural"`
+	Queries        []string `json:"queries,omitempty" jsonschema:"Varias preguntas en una sola llamada (máx. 200 en total); cada una se responde en su bloque"`
 	Topics         []string `json:"topics,omitempty" jsonschema:"Temas conocidos a priorizar (opcional; si no, se detectan)"`
-	Limit          int      `json:"limit,omitempty" jsonschema:"Resultados (por defecto 8, máx. 20)"`
+	Limit          int      `json:"limit,omitempty" jsonschema:"Resultados por pregunta (por defecto 8, máx. 20)"`
 	IncludeHistory bool     `json:"include_history,omitempty" jsonschema:"Incluir registros sustituidos e invalidados"`
 }
 
 func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, any, error) {
+	queries, err := recallQueries(in)
+	if err != nil {
+		return errorResult(err), nil, nil
+	}
 	if _, err := s.begin(ctx, req); err != nil {
 		return errorResult(err), nil, nil
 	}
-	res, err := s.d.Recall.Recall(ctx, recall.Request{
-		Query:          in.Query,
+	base := recall.Request{
 		Topics:         in.Topics,
 		Limit:          in.Limit,
 		IncludeHistory: in.IncludeHistory,
-	})
+	}
+	if len(queries) > 1 {
+		return textResult(s.recallBatch(ctx, queries, base)), nil, nil
+	}
+	base.Query = queries[0]
+	res, err := s.d.Recall.Recall(ctx, base)
 	if err != nil {
 		return errorResult(err), nil, nil
 	}
@@ -37,7 +46,7 @@ func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in 
 
 // getInput is the input of the get tool.
 type getInput struct {
-	IDs []int64 `json:"ids" jsonschema:"Ids de los registros (máx. 20)"`
+	IDs []int64 `json:"ids" jsonschema:"Ids de los registros (máx. 200)"`
 }
 
 func (s *Server) handleGet(ctx context.Context, req *mcp.CallToolRequest, in getInput) (*mcp.CallToolResult, any, error) {
@@ -113,9 +122,9 @@ func label(m map[string]string, key string) string {
 // formatFull renders one record, omitting empty lines:
 //
 //	#123 [decisión · vigente · 2026-09-28] Título
-//	temas: a, b · clave: x
+//	etiquetas: #a, #b · clave: x
 //	<contenido>
-//	relaciones: sustituye a #45 «t» (confirmada); sustituido por #9 «u» (confirmada)
+//	relaciones: sustituye a #45 «t» (confirmada); relacionado con #9 «u» (confirmada; veredicto compatible, confianza 0.90)
 func formatFull(f memory.Full) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "#%d [%s · %s · %s] %s", f.ID,
@@ -124,7 +133,7 @@ func formatFull(f memory.Full) string {
 
 	var meta []string
 	if len(f.Topics) > 0 {
-		meta = append(meta, "temas: "+strings.Join(f.Topics, ", "))
+		meta = append(meta, "etiquetas: #"+strings.Join(f.Topics, ", #"))
 	}
 	if f.Key != "" {
 		meta = append(meta, "clave: "+f.Key)
@@ -146,7 +155,14 @@ func formatFull(f memory.Full) string {
 					phrase = p[1]
 				}
 			}
-			rels[i] = fmt.Sprintf("%s #%d «%s» (%s)", phrase, r.OtherID, oneLine(r.OtherTitle), label(stateLabels, r.State))
+			state := label(stateLabels, r.State)
+			if r.Verdict != "" {
+				state += "; veredicto " + r.Verdict
+				if r.Confidence != nil {
+					state += fmt.Sprintf(", confianza %.2f", *r.Confidence)
+				}
+			}
+			rels[i] = fmt.Sprintf("%s #%d «%s» (%s)", phrase, r.OtherID, oneLine(r.OtherTitle), state)
 		}
 		b.WriteString("\nrelaciones: " + strings.Join(rels, "; "))
 	}

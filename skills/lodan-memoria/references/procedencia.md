@@ -8,6 +8,8 @@ Skill creada con `crear-skills` el 2026-09-29, fusionando tres fuentes con objet
 | Engram, skill `memory` del plugin de Claude Code | https://github.com/Gentleman-Programming/engram/blob/main/plugin/claude-code/skills/memory/SKILL.md | MIT (Copyright (c) 2026 Alan Buscaglia) | Disparadores de guardado tras confirmación o rechazo del usuario, uso de clave estable para datos que evolucionan, protocolo de cierre de sesión y de recuperación tras compactación, «la memoria no es la respuesta al usuario» | Adaptado a `remember`/`recall`/`session`; resumen de sesión corto en vez de plantilla larga; sin guardar prompts |
 | `lodan-memory` del prototipo anterior (autor: el propio usuario) | `~/.gemini/config/skills/lodan-memory/SKILL.md` | Propia | Sección «No usar para…», recuperación progresiva para ahorrar tokens | Herramientas antiguas sustituidas por las 6 actuales |
 
+Ampliación del 2026-10-12 ([trabajo-desarrollo.md](trabajo-desarrollo.md)), tras instalar gentle-ai 4.1.0 y retirar su componente Engram: equivalencias `mem_*` → lodan; casos de guardado de desarrollo (bugfix, descubrimiento, convención, cambio de configuración) y formato qué/por qué/dónde/aprendido, del protocolo de Engram (MIT); «la memoria antigua se verifica antes de usarla», de la regla `needs_review` de `engram-convention.md` de gentle-ai; espejo de tareas ODD y bloque `## Key Learnings`, de las instrucciones de orquestador de gentle-ai (https://github.com/Gentleman-Programming/gentle-ai, licencia no verificada; solo se toman ideas, reformuladas).
+
 Criterios de qué guardar: PRD de lodan (`specs/PRD.md`, R14) y ejemplos del usuario.
 
 Ningún texto se copia literalmente; las ideas se reformulan. Aun así, se conservan las atribuciones de las licencias MIT y Apache-2.0.

@@ -193,8 +193,8 @@ func TestE2E(t *testing.T) {
 		if len(lines) != 2 {
 			t.Fatalf("remember devolvió %d líneas, quería 2:\n%s", len(lines), out)
 		}
-		wantContains(t, lines[0], "guardado · temas: entrenamiento")
-		wantContains(t, lines[1], "guardado · temas: entrenamiento (gym→entrenamiento)")
+		wantContains(t, lines[0], "guardado · etiquetas: #entrenamiento (nueva)")
+		wantContains(t, lines[1], "guardado · etiquetas: #gym (nueva)")
 		id := firstID(t, lines[0])
 
 		// Repetirlo es un duplicado.
@@ -205,7 +205,7 @@ func TestE2E(t *testing.T) {
 		wantContains(t, found, "#"+id, "Rutina de entrenamiento", "Tema: entrenamiento")
 
 		got := mustOK(t, cs, "get", map[string]any{"ids": []int64{1, 9999}})
-		wantContains(t, got, "#1 [preferencia · vigente · ", "temas: entrenamiento", "Entrenar pierna", "no encontrados: #9999")
+		wantContains(t, got, "#1 [preferencia · vigente · ", "etiquetas: #entrenamiento", "Entrenar pierna", "no encontrados: #9999")
 
 		mustOK(t, cs, "revise", map[string]any{"id": 1, "action": "relate", "with_id": 2})
 		got = mustOK(t, cs, "get", map[string]any{"ids": []int64{2}})
@@ -333,7 +333,7 @@ func TestE2E(t *testing.T) {
 	run("status", func(t *testing.T, _ Deps, srv *Server) {
 		cs := connect(t, srv, "test-client")
 		out := mustOK(t, cs, "status", map[string]any{})
-		wantContains(t, out, "BD: ok", "registros vigentes: 0", "pendientes de embedding: 0", "temas: 0", "sesiones: 0", "Ollama: no aplica")
+		wantContains(t, out, "BD: ok", "registros vigentes: 0", "pendientes de embedding: 0", "etiquetas: 0", "sesiones: 0", "Ollama: no aplica")
 
 		// status no abre sesión.
 		remember(t, cs, item("Una", "contenido uno", "note", "tema"))

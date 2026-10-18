@@ -37,6 +37,7 @@ func TestDefault(t *testing.T) {
 		DupSimilarity:         0.92,
 		TopicSimilarity:       0.72,
 		TopicDetectSimilarity: 0.40,
+		TagLinkStrength:       3.0,
 	}
 	if c != want {
 		t.Fatalf("Default() = %+v, se esperaba %+v", c, want)

@@ -1,8 +1,9 @@
 // Package topic resolves free-form topic names into stored topics.
 //
-// Topics have no catalog, but they must not multiply into synonyms ("gym" vs
-// "entrenamiento"). Names are normalized into kebab-case slugs and, when a slug
-// is new, compared by embedding similarity against the existing topics.
+// Topics (shown to the AIs as tags) have no catalog. Names are normalized into
+// kebab-case slugs; a slug equal to an existing one once every "-" is removed
+// resolves to that one. Similar meanings are never merged automatically: the
+// alias dictionary decides which tags are the same.
 package topic
 
 import (

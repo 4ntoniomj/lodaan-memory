@@ -100,10 +100,16 @@ func (r Result) lines() []string {
 	section("Datos estables:", r.Profile)
 	section("Últimos eventos:", r.Events)
 	section("Resultados:", r.Results)
+	if len(r.Connected) > 0 {
+		out = append(out, "Conectado por etiquetas:")
+		for _, l := range r.Connected {
+			out = append(out, l.line()+" (por #"+l.Tag+")")
+		}
+	}
 	return out
 }
 
-// line renders one item as "#id [tipo fecha, estado] título — fragmento".
+// line renders one item as "#id [tipo fecha, estado] título · #a #b — fragmento".
 func (it Item) line() string {
 	label, ok := kindLabels[it.Kind]
 	if !ok {
@@ -123,6 +129,9 @@ func (it Item) line() string {
 		label += ", invalidado"
 	}
 	s := fmt.Sprintf("#%d [%s] %s", it.ID, label, oneLine(it.Title))
+	if len(it.Tags) > 0 {
+		s += " · #" + strings.Join(it.Tags, " #")
+	}
 	if snip := oneLine(it.Snippet); snip != "" {
 		s += " — " + snip
 	}

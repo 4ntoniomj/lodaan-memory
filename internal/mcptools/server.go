@@ -24,7 +24,7 @@ import (
 
 // Instructions is delivered to every client in the MCP initialize handshake. It
 // costs tokens in every session of every AI: keep it at 1500 characters or fewer.
-const Instructions = `lodan es tu memoria persistente, compartida con el usuario entre todas sus IAs. Guarda sin preguntar lo que tenga sustancia: decisiones, datos estables, preferencias, eventos y notas del usuario (p. ej. «quiero que la base de datos use embeddings»). No guardes charla, órdenes de rol (p. ej. «eres el agente orquestador»), datos temporales ni lo ya guardado. Tras guardar, díselo al usuario en una sola línea. Cada registro: título corto, contenido autosuficiente, tipo (fact, preference, decision, event, note) y 1-3 temas libres (reutiliza los existentes). Usa key para datos que cambian (p. ej. entrenamiento/horario): el nuevo sustituye al anterior. En cuanto la conversación toque un tema, llama a recall una vez con la pregunta en lenguaje natural: devuelve la ficha del tema, los últimos eventos y resultados; usa get solo si necesitas el detalle. Si algo deja de valer, usa revise (supersede o invalidate); delete solo si el usuario pide borrarlo definitivamente. Tras una compactación de contexto, vuelve a llamar a recall. Al terminar la conversación, llama a session con action end y un resumen breve. Para «la última conversación» usa session con action last.`
+const Instructions = `lodan es tu memoria persistente, compartida con el usuario entre todas sus IAs. Guarda sin preguntar lo que tenga sustancia (decisiones, datos estables, preferencias, eventos, notas); no guardes charla, órdenes de rol ni datos temporales. Cada registro: título corto, contenido autosuficiente con fechas absolutas (convierte «hoy» o «ayer» en AAAA-MM-DD, también en occurred_at), tipo (fact, preference, decision, event, note) y 1-3 temas que reutilicen los existentes; key para datos que cambian. Trabaja en lote: todas las preguntas en un recall (queries), todos los registros en un remember y todas las operaciones en un revise o session (ops). Tras guardar, revisa cada línea «revisa:»: si contradice lo nuevo (mismo asunto y momento, valor distinto), pregunta al usuario cuál es el bueno y aplica supersede o invalidate; si está relacionado aunque no se parezca, relaciónalo (relate o revise relate: related, part_of, contradicts); si no, ignóralo. Di lo guardado en una línea. En cuanto surja un tema, llama a recall antes de responder; get solo para el detalle. Responde con todo lo que lodan tenga sobre lo preguntado, buscando también por sus siglas y alias, y sin relleno: un dato por línea, sin párrafos y sin ofrecer aparte datos que ya tienes. Tras una compactación, vuelve a llamar a recall. Al terminar, session end con un resumen; para «la última conversación», session last.`
 
 // Deps are the services the tools need. Everything is created by the caller
 // (the CLI, or a test) and shared by all the MCP connections of the process.
@@ -67,12 +67,12 @@ func NewServer(d Deps) *Server {
 // Tool descriptions. Each character is paid in tokens by every session, so they
 // are short (at most 200 characters).
 const (
-	descRemember = "Guarda registros en la memoria compartida (dato, preferencia, decisión, evento o nota). Deduplica, resuelve los temas y avisa de parecidos."
-	descRecall   = "Recupera de la memoria lo relevante para una pregunta en lenguaje natural: ficha del tema, últimos eventos y resultados. Llámala en cuanto surja un tema."
-	descGet      = "Devuelve el contenido completo y las relaciones de registros concretos por id (por ejemplo, tras recall)."
-	descRevise   = "Cambia un registro: update, supersede (lo sustituye otro), invalidate, delete (definitivo, con confirm) o gestiona relaciones (relate, confirm_relation, reject_relation)."
-	descSession  = "Consulta o cierra conversaciones: last (la última; filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
-	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones y Ollama."
+	descRemember = "Guarda registros (máx. 200 por llamada) con etiquetas (#coche-1234abc generales y concretas, máx. 8). Deduplica, resuelve etiquetas y alias, crea las relaciones de relate y lista con «revisa:» registros a comprobar. Con `preview: true` corre todas las comprobaciones sin guardar nada; úsalo antes de guardar algo caro."
+	descRecall   = "Recupera lo relevante para una o varias preguntas (queries, máx. 200) en lenguaje natural: ficha del tema, últimos eventos y resultados. Sigue las etiquetas concretas y trae lo conectado por etiquetas en una sola llamada. Llámala en cuanto surja un tema."
+	descGet      = "Devuelve el contenido completo, etiquetas, clave y relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
+	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm); relaciones (relate, confirm_relation, reject_relation); etiquetas (alias, reject_alias); veredictos sobre conflictos (verdict, con confianza); o junta registros repetidos en uno nuevo (merge, con vista previa y huella)."
+	descSession  = "Consulta o cierra conversaciones, una o varias en ops (máx. 200): last (filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
+	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones, Ollama, alias confirmados y pendientes, contradicciones abiertas y veredictos pendientes."
 )
 
 // register adds the six tools to srv. The input schemas are inferred from the
@@ -83,19 +83,28 @@ func (s *Server) register(srv *mcp.Server) {
 	setEnum(remember.Properties["items"].Items, "kind", kindNames...)
 	mcp.AddTool(srv, &mcp.Tool{Name: "remember", Description: descRemember, InputSchema: remember}, s.handleRemember)
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "recall", Description: descRecall, InputSchema: schemaFor[recallInput]()}, s.handleRecall)
-	mcp.AddTool(srv, &mcp.Tool{Name: "get", Description: descGet, InputSchema: schemaFor[getInput]()}, s.handleGet)
+	mcp.AddTool(srv, &mcp.Tool{Name: "recall", Description: descRecall, InputSchema: schemaFor[recallInput](), Annotations: readOnly()}, s.handleRecall)
+	mcp.AddTool(srv, &mcp.Tool{Name: "get", Description: descGet, InputSchema: schemaFor[getInput](), Annotations: readOnly()}, s.handleGet)
 
 	revise := schemaFor[reviseInput]()
 	setEnum(revise, "action", reviseActions...)
 	setEnum(revise, "relation", relationKinds...)
+	setEnum(revise.Properties["ops"].Items, "action", reviseActions...)
+	setEnum(revise.Properties["ops"].Items, "relation", relationKinds...)
 	mcp.AddTool(srv, &mcp.Tool{Name: "revise", Description: descRevise, InputSchema: revise}, s.handleRevise)
 
 	sess := schemaFor[sessionInput]()
 	setEnum(sess, "action", sessionActions...)
+	setEnum(sess.Properties["ops"].Items, "action", sessionActions...)
 	mcp.AddTool(srv, &mcp.Tool{Name: "session", Description: descSession, InputSchema: sess}, s.handleSession)
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "status", Description: descStatus, InputSchema: schemaFor[statusInput]()}, s.handleStatus)
+	mcp.AddTool(srv, &mcp.Tool{Name: "status", Description: descStatus, InputSchema: schemaFor[statusInput](), Annotations: readOnly()}, s.handleStatus)
+}
+
+// readOnly marks a tool that only reads, so clients may run several calls of
+// it at the same time.
+func readOnly() *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{ReadOnlyHint: true}
 }
 
 // Enumerations of the tool inputs.
@@ -104,7 +113,7 @@ var kindNames = []string{
 	string(memory.KindEvent), string(memory.KindNote),
 }
 
-var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation"}
+var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation", "alias", "reject_alias", "verdict", "merge"}
 
 var relationKinds = []string{"related", "contradicts", "part_of", "supersedes"}
 

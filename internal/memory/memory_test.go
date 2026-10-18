@@ -157,7 +157,7 @@ func note(title, content string) Item {
 }
 
 // nearPair saves two records whose content differs in one word out of many
-// and returns their results: b has a as a similar record.
+// and returns their results. Similar content creates no relation by itself.
 func nearPair(t *testing.T, e *env) (a, b Saved) {
 	t.Helper()
 	a = e.save(t, note("Lista de términos", words("termino", nearWordCount)))
@@ -165,10 +165,17 @@ func nearPair(t *testing.T, e *env) (a, b Saved) {
 	if a.Duplicate || b.Duplicate {
 		t.Fatalf("los registros casi iguales no deberían ser duplicados exactos: %+v %+v", a, b)
 	}
-	if len(b.Similar) == 0 || b.Similar[0].ID != a.ID {
-		t.Fatalf("b debería tener a a=#%d como parecido, Similar = %+v", a.ID, b.Similar)
-	}
 	return a, b
+}
+
+// suggest inserts a pre-existing suggested "related" relation src -> dst, such as
+// the ones an older version created by similarity (no code path creates them now).
+func suggest(t *testing.T, e *env, src, dst int64) {
+	t.Helper()
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO memory_relations (source_id, target_id, kind, state)
+		VALUES ($1, $2, 'related', 'suggested') ON CONFLICT DO NOTHING`, src, dst); err != nil {
+		t.Fatalf("no se pudo insertar la relación sugerida: %v", err)
+	}
 }
 
 func TestParseKind(t *testing.T) {
@@ -298,8 +305,8 @@ func TestService(t *testing.T) {
 		if !dup.Duplicate || dup.ID != first.ID || dup.Title != "Horario" {
 			t.Errorf("se esperaba duplicado de #%d (Horario), se obtuvo %+v", first.ID, dup)
 		}
-		if len(dup.Topics) != 0 || dup.Pending || len(dup.Similar) != 0 {
-			t.Errorf("un duplicado no debería llevar temas, pendiente ni parecidos: %+v", dup)
+		if len(dup.Topics) != 0 || dup.Pending {
+			t.Errorf("un duplicado no debería llevar temas ni pendiente: %+v", dup)
 		}
 		if n := e.count(t, `SELECT count(*) FROM memories`); n != 1 {
 			t.Errorf("hay %d registros, se esperaba 1", n)
@@ -347,34 +354,14 @@ func TestService(t *testing.T) {
 		if n := e.count(t, `SELECT count(*) FROM memory_topics WHERE memory_id = $1 AND active`, cur.ID); n != 1 {
 			t.Errorf("el nuevo tiene %d temas activos, se esperaba 1", n)
 		}
-		// El sustituido no debe salir como parecido aunque el contenido se parezca.
-		if len(cur.Similar) != 0 {
-			for _, n := range cur.Similar {
-				if n.ID == old.ID {
-					t.Errorf("el registro sustituido no debería salir como parecido: %+v", cur.Similar)
-				}
-			}
-		}
 	})
 
-	// Criterio 4.
-	run("un contenido casi igual sugiere una relación", func(t *testing.T, e *env) {
+	// S5: similarity alone creates no relation.
+	run("un contenido casi igual no crea relaciones", func(t *testing.T, e *env) {
 		a, b := nearPair(t, e)
-		if b.Similar[0].Title != "Lista de términos" || b.Similar[0].Similarity < testDup {
-			t.Errorf("parecido inesperado: %+v", b.Similar[0])
-		}
-		if len(a.Similar) != 0 {
-			t.Errorf("el primero no debería tener parecidos: %+v", a.Similar)
-		}
-		if n := e.count(t, `SELECT count(*) FROM memory_relations
-			WHERE source_id = $1 AND target_id = $2 AND kind = 'related' AND state = 'suggested'`, b.ID, a.ID); n != 1 {
-			t.Errorf("relaciones related suggested = %d, se esperaba 1", n)
-		}
-
-		// Un contenido sin palabras en común no se sugiere.
 		c := e.save(t, note("Otra cosa", words("distinto", nearWordCount)))
-		if len(c.Similar) != 0 {
-			t.Errorf("un contenido distinto no debería tener parecidos: %+v", c.Similar)
+		if n := e.count(t, `SELECT count(*) FROM memory_relations`); n != 0 {
+			t.Errorf("hay %d relaciones tras guardar #%d, #%d y #%d, se esperaban 0", n, a.ID, b.ID, c.ID)
 		}
 	})
 
@@ -393,7 +380,7 @@ func TestService(t *testing.T) {
 				t.Fatalf("Remember sin Ollama falló: %v", err)
 			}
 			for _, s := range saved {
-				if !s.Pending || s.ID <= 0 || len(s.Similar) != 0 {
+				if !s.Pending || s.ID <= 0 {
 					t.Fatalf("se esperaba un registro pendiente: %+v", s)
 				}
 				ids = append(ids, s.ID)
@@ -441,7 +428,7 @@ func TestService(t *testing.T) {
 		if elapsed := time.Since(start); elapsed > 10*time.Second {
 			t.Errorf("Remember tardó %v: no respetó el plazo de embedding", elapsed)
 		}
-		if len(saved) != 1 || !saved[0].Pending || saved[0].ID <= 0 || len(saved[0].Similar) != 0 {
+		if len(saved) != 1 || !saved[0].Pending || saved[0].ID <= 0 {
 			t.Fatalf("se esperaba un registro pendiente: %+v", saved)
 		}
 		if n := e.count(t, `SELECT count(*) FROM memories WHERE id = $1 AND embedding IS NULL AND embedding_model IS NULL`, saved[0].ID); n != 1 {
@@ -454,43 +441,19 @@ func TestService(t *testing.T) {
 		}
 	})
 
-	// Criterio 5 (parecidos en segundo plano).
-	run("FillPending sugiere los parecidos de un registro pendiente", func(t *testing.T, e *env) {
-		a := e.save(t, note("Lista de términos", words("termino", nearWordCount)))
+	// S5: the pending-embedding worker creates no relations by similarity.
+	run("FillPending no crea relaciones por parecido", func(t *testing.T, e *env) {
+		e.save(t, note("Lista de términos", words("termino", nearWordCount)))
 		down := e.serviceWith(unavailableEmbedder{dims: testDims})
 		saved, err := down.Remember(e.ctx, e.tr, []Item{note("Lista de términos", words("termino", nearWordCount-1)+" distinto")})
 		if err != nil || len(saved) != 1 || !saved[0].Pending {
 			t.Fatalf("Remember sin Ollama = %+v, %v; se esperaba un registro pendiente", saved, err)
 		}
-		b := saved[0]
-
-		// Un pendiente que deja de estar vigente antes de completarse no recibe relaciones.
-		savedInv, err := down.Remember(e.ctx, e.tr, []Item{note("Lista de términos", words("termino", nearWordCount-1)+" invalidado")})
-		if err != nil || len(savedInv) != 1 || !savedInv[0].Pending {
-			t.Fatalf("Remember sin Ollama = %+v, %v; se esperaba un registro pendiente", savedInv, err)
+		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 1 {
+			t.Fatalf("FillPending = %d, %v; se esperaba 1", n, err)
 		}
-		e.revise(t, Revision{ID: savedInv[0].ID, Action: "invalidate"})
-
 		if n := e.count(t, `SELECT count(*) FROM memory_relations`); n != 0 {
-			t.Fatalf("antes de FillPending hay %d relaciones, se esperaban 0", n)
-		}
-		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 2 {
-			t.Fatalf("FillPending = %d, %v; se esperaban 2", n, err)
-		}
-		if n := e.count(t, `SELECT count(*) FROM memory_relations
-			WHERE source_id = $1 AND target_id = $2 AND kind = 'related' AND state = 'suggested'`, b.ID, a.ID); n != 1 {
-			t.Errorf("relaciones related suggested #%d -> #%d = %d, se esperaba 1", b.ID, a.ID, n)
-		}
-		if n := e.count(t, `SELECT count(*) FROM memory_relations WHERE source_id = $1`, savedInv[0].ID); n != 0 {
-			t.Errorf("el registro invalidado tiene %d relaciones, se esperaban 0", n)
-		}
-		if n := e.count(t, `SELECT count(*) FROM memory_relations WHERE source_id = $1 OR target_id = $1`, b.ID); n != 1 {
-			t.Errorf("el registro #%d tiene %d relaciones, se esperaba solo 1 (con el vigente)", b.ID, n)
-		}
-
-		// Ejecutarlo otra vez no duplica nada.
-		if n, err := e.svc.FillPending(e.ctx, 10); err != nil || n != 0 {
-			t.Fatalf("segundo FillPending = %d, %v; se esperaba 0", n, err)
+			t.Errorf("hay %d relaciones tras FillPending, se esperaban 0", n)
 		}
 	})
 
@@ -499,9 +462,7 @@ func TestService(t *testing.T) {
 		a := e.save(t, Item{Title: "Lista de términos", Content: words("termino", nearWordCount), Kind: KindFact,
 			Topics: []string{"zeta-tema-largo", "alfa-tema-largo"}, Key: "lista/terminos"})
 		b := e.save(t, note("Lista de términos", words("termino", nearWordCount-1)+" distinto"))
-		if len(b.Similar) == 0 {
-			t.Fatalf("b debería tener parecidos: %+v", b)
-		}
+		suggest(t, e, b.ID, a.ID)
 
 		got, err := e.svc.Get(e.ctx, []int64{b.ID, 9999, a.ID, b.ID})
 		if err != nil {
@@ -535,7 +496,7 @@ func TestService(t *testing.T) {
 		if _, err := e.svc.Get(e.ctx, nil); err == nil {
 			t.Error("Get sin ids debería fallar")
 		}
-		many := make([]int64, 21)
+		many := make([]int64, 201)
 		for i := range many {
 			many[i] = int64(i + 1)
 		}
@@ -670,7 +631,8 @@ func TestService(t *testing.T) {
 	})
 
 	run("revise delete", func(t *testing.T, e *env) {
-		a, b := nearPair(t, e) // hay una relación y temas asociados
+		a, b := nearPair(t, e)
+		e.revise(t, Revision{ID: b.ID, Action: "relate", WithID: a.ID}) // hay una relación y temas asociados
 		_, err := e.svc.Revise(e.ctx, e.tr, Revision{ID: a.ID, Action: "delete"})
 		wantErr(t, err, "para borrar definitivamente hay que confirmar (confirm: true)")
 		if n := e.count(t, `SELECT count(*) FROM memories WHERE id = $1`, a.ID); n != 1 {
@@ -722,6 +684,7 @@ func TestService(t *testing.T) {
 
 	run("revise relate confirma una sugerencia", func(t *testing.T, e *env) {
 		a, b := nearPair(t, e)
+		suggest(t, e, b.ID, a.ID)
 		e.revise(t, Revision{ID: b.ID, Action: "relate", WithID: a.ID})
 		if n := e.count(t, `SELECT count(*) FROM memory_relations
 			WHERE source_id = $1 AND target_id = $2 AND kind = 'related' AND state = 'confirmed'`, b.ID, a.ID); n != 1 {
@@ -730,7 +693,8 @@ func TestService(t *testing.T) {
 	})
 
 	run("revise confirm_relation y reject_relation", func(t *testing.T, e *env) {
-		a, b := nearPair(t, e) // relación related suggested b -> a
+		a, b := nearPair(t, e)
+		suggest(t, e, b.ID, a.ID) // relación related suggested b -> a
 
 		// En el sentido contrario al de la relación.
 		e.revise(t, Revision{ID: a.ID, Action: "confirm_relation", WithID: b.ID})
@@ -762,7 +726,7 @@ func TestService(t *testing.T) {
 	})
 
 	run("validaciones de Remember", func(t *testing.T, e *env) {
-		many := make([]Item, 21)
+		many := make([]Item, 201)
 		for i := range many {
 			many[i] = note(fmt.Sprintf("T%d", i), words(fmt.Sprintf("m%dx", i), 3))
 		}
@@ -772,7 +736,7 @@ func TestService(t *testing.T) {
 			want  string
 		}{
 			{"sin ítems", nil, "al menos un ítem"},
-			{"demasiados ítems", many, "el máximo es 20"},
+			{"demasiados ítems", many, "el máximo es 200"},
 			{"título vacío", []Item{{Title: "   ", Content: "x", Kind: KindNote}}, "título"},
 			{"título largo", []Item{{Title: strings.Repeat("ñ", 201), Content: "x", Kind: KindNote}}, "título"},
 			{"contenido vacío", []Item{{Title: "t", Content: " \n ", Kind: KindNote}}, "contenido"},

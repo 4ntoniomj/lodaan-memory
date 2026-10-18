@@ -9,7 +9,7 @@ import (
 // Get returns the complete records with the given ids (at most 20), in the
 // order requested and without repeats. Ids that do not exist are omitted.
 // Each record includes its topic slugs (sorted) and its relations in both
-// directions.
+// directions, with their verdicts.
 func (s *Service) Get(ctx context.Context, ids []int64) ([]Full, error) {
 	if len(ids) == 0 {
 		return nil, errors.New("hay que indicar al menos un id")
@@ -50,11 +50,12 @@ func (s *Service) Get(ctx context.Context, ids []int64) ([]Full, error) {
 
 	rels, err := s.pool.Query(ctx, `
 		SELECT r.source_id AS this_id, r.target_id AS other_id, r.kind::text AS kind, r.state::text AS state,
-			true AS outgoing, o.title
+			true AS outgoing, o.title, COALESCE(r.verdict, ''), r.confidence::float8
 		FROM memory_relations r JOIN memories o ON o.id = r.target_id
 		WHERE r.source_id = ANY($1)
 		UNION ALL
-		SELECT r.target_id, r.source_id, r.kind::text, r.state::text, false, o.title
+		SELECT r.target_id, r.source_id, r.kind::text, r.state::text, false, o.title,
+			COALESCE(r.verdict, ''), r.confidence::float8
 		FROM memory_relations r JOIN memories o ON o.id = r.source_id
 		WHERE r.target_id = ANY($1)
 		ORDER BY this_id, outgoing DESC, kind, other_id`, ids)
@@ -65,7 +66,8 @@ func (s *Service) Get(ctx context.Context, ids []int64) ([]Full, error) {
 	for rels.Next() {
 		var thisID int64
 		var r Relation
-		if err := rels.Scan(&thisID, &r.OtherID, &r.Kind, &r.State, &r.Outgoing, &r.OtherTitle); err != nil {
+		if err := rels.Scan(&thisID, &r.OtherID, &r.Kind, &r.State, &r.Outgoing, &r.OtherTitle,
+			&r.Verdict, &r.Confidence); err != nil {
 			return nil, fmt.Errorf("no se pudo leer una relación: %w", err)
 		}
 		if f, ok := byID[thisID]; ok {

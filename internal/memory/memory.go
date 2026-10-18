@@ -30,19 +30,30 @@ import (
 
 const (
 	// maxItems is the maximum number of items per Remember call.
-	maxItems = 20
+	maxItems = MaxBatch
 	// maxGetIDs is the maximum number of ids per Get call.
-	maxGetIDs = 20
+	maxGetIDs = MaxBatch
 	// maxTitleLen and maxContentLen are measured in runes, after trimming.
 	maxTitleLen   = 200
 	maxContentLen = 8000
 	// defaultTopic is used when an item has no usable topic.
 	defaultTopic = "general"
+	// MaxTags is the maximum number of distinct tags of a record.
+	MaxTags = 8
 	// fillBatchSize is the number of pending records embedded per transaction.
 	fillBatchSize = 32
-	// neighborCandidates and maxNeighbors bound the similar-record search done by Remember.
-	neighborCandidates = 50
-	maxNeighbors       = 3
+)
+
+// MaxBatch is the safety cap shared by every batched operation of lodan
+// (items, ids, queries and operations per call). It is not a usage limit: it
+// only stops a runaway caller from sending an unbounded request.
+const MaxBatch = 200
+
+// Relation kinds an item can declare with Item.Relate.
+const (
+	RelationRelated     = "related"
+	RelationContradicts = "contradicts"
+	RelationPartOf      = "part_of"
 )
 
 // Kind is the type of a memory record.
@@ -80,12 +91,24 @@ const (
 type Item struct {
 	Title, Content string
 	Kind           Kind
-	// Topics are free-form topic names; empty means "general".
+	// Tags and Topics are free-form tag names, joined (tags first); none
+	// means "general". At most MaxTags distinct ones after normalization.
+	Tags   []string
 	Topics []string
 	// Key, if not empty, makes the item replace the active record with the same key.
 	Key string
 	// OccurredAt is when the fact happened; nil means now.
 	OccurredAt *time.Time
+	// Relate lists existing records the new one is linked to, with a confirmed
+	// relation from the new record to each.
+	Relate []RelateTo
+}
+
+// RelateTo is a relation requested when saving an item.
+type RelateTo struct {
+	ID int64
+	// Kind is RelationRelated (the default when empty), RelationContradicts or RelationPartOf.
+	Kind string
 }
 
 // Neighbor is an active record semantically similar to another one.
@@ -108,8 +131,16 @@ type Saved struct {
 	Pending bool
 	// Superseded lists the records replaced because they had the same key.
 	Superseded []int64
-	// Similar lists active records similar enough to be duplicates or contradictions.
-	Similar []Neighbor
+	// Related lists the records the item was linked to through Item.Relate.
+	Related []int64
+	// MissingRelations lists the Item.Relate targets that do not exist; the item
+	// is saved anyway.
+	MissingRelations []int64
+	// Suggestions are the existing tags that may be the same as a tag this
+	// item created (pending alias suggestions).
+	Suggestions []TagSuggestion
+	// Vector is the embedding of the record (nil when Pending or Duplicate).
+	Vector []float32
 }
 
 // Relation links a record with another one.
@@ -119,6 +150,10 @@ type Relation struct {
 	OtherTitle  string
 	// Outgoing is true when the record is the source of the relation.
 	Outgoing bool
+	// Verdict and Confidence are the stored verdict of the relation (see
+	// Service.Revise, action verdict); Verdict is empty and Confidence nil when none.
+	Verdict    string
+	Confidence *float64
 }
 
 // Full is a complete record with its topics and relations.
@@ -140,15 +175,28 @@ type Full struct {
 // Revision describes a change to an existing record; see Service.Revise.
 type Revision struct {
 	ID     int64
-	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation
+	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict, merge
 	WithID int64
 	// Relation is the relation kind for relate, confirm_relation and reject_relation.
 	Relation string
 	Title    string
 	Content  string
-	Topics   []string
-	// Confirm must be true for delete.
+	// Tag and WithTag are the two tags of alias and reject_alias.
+	Tag, WithTag string
+	// Tags and Topics are the new tags for update, joined (tags first).
+	Tags   []string
+	Topics []string
+	// Confirm must be true for delete and to commit a merge preview.
 	Confirm bool
+	// Verdict (contradice, sustituye, compatible, no_relacionado) and
+	// Confidence (0..1, required; nil means missing) are the inputs of verdict.
+	Verdict    string
+	Confidence *float64
+	// IDs are the records to merge (≥2). For merge only; ID is not needed.
+	IDs []int64
+	// Fingerprint is the 8-char hex fingerprint returned by a merge preview,
+	// required with Confirm to commit a merge.
+	Fingerprint string
 }
 
 // Service saves, revises and reads memory records. It is safe for concurrent use.

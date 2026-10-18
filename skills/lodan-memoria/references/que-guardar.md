@@ -35,6 +35,18 @@ También se guarda cuando el usuario confirma o rechaza una propuesta («vale, h
 - No hay catálogo fijo: crea el que haga falta, pero reutiliza el existente si lo conoces (el servidor fusiona equivalentes como `gimnasio` → `entrenamiento` y avisa en la respuesta).
 - Un proyecto es un tema más (`lodan`); no hace falta un tema genérico `proyectos`.
 
+## Contradicción, cambio o dato nuevo
+
+Dos registros se contradicen cuando hablan de **lo mismo**, en **el mismo momento o con la misma vigencia**, y dicen **valores incompatibles**:
+
+| Caso | ¿Contradicción? |
+| :--- | :--- |
+| «El 2026-10-15 desayuné tostadas» y «El 2026-10-15 desayuné churros» | Sí: mismo día, mismo desayuno. Se pregunta cuál es el bueno |
+| «Desayuno tostadas el lunes» y «Desayuno churros el martes» | No: días distintos |
+| «Mi coche es un Seat León» y «Mi coche es un Toyota Corolla» | Sí, salvo que el usuario haya cambiado de coche: se pregunta |
+| «Entreno por la tarde» y «A partir de ahora entreno por la mañana» | No: es un cambio explícito. Se sustituye sin preguntar |
+| «La matrícula es 1234 ABC» y «El seguro vence en marzo» | No: datos distintos del mismo coche. Se relacionan |
+
 ## Claves (`key`)
 
 Para datos que cambian con el tiempo y de los que solo interesa el valor vigente: `entrenamiento/horario`, `coche/kilometraje`, `lodan/estado`. Guardar con la misma `key` sustituye al anterior y conserva el antiguo como historial. No uses `key` para eventos: cada evento es único.
@@ -43,4 +55,5 @@ Para datos que cambian con el tiempo y de los que solo interesa el valor vigente
 
 - Título: de 3 a 8 palabras, buscable, sin fecha si es un evento (la fecha va en `occurred_at`).
 - Contenido: una o dos frases que se entiendan solas, con el porqué si lo hay. Mejor «Elegimos PostgreSQL + pgvector porque el usuario lo pidió y escala a millones de registros» que «Elegimos eso».
+- Fechas siempre absolutas, en el contenido y en `occurred_at`: «ayer desayuné churros», dicho el 2026-10-16, es «El 2026-10-15 desayuné churros» con `occurred_at: 2026-10-15`. Una fecha relativa guardada deja de tener sentido al día siguiente y oculta las contradicciones.
 - En el idioma del usuario.

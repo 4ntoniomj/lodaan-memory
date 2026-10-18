@@ -34,6 +34,14 @@ type Embedder interface {
 	Dims() int
 }
 
+// QueryBatcher is implemented by embedders that can embed several search
+// queries in one call. Callers type-assert it and fall back to EmbedQuery.
+type QueryBatcher interface {
+	// EmbedQueries embeds a batch of queries, in order. An empty batch returns
+	// nil without any work.
+	EmbedQueries(ctx context.Context, qs []string) ([][]float32, error)
+}
+
 // promptFormat describes how a model expects queries and documents to be
 // prefixed before embedding.
 type promptFormat struct {

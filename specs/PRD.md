@@ -79,7 +79,7 @@ Por orden de prioridad:
 | R4 | **Temas libres**, varios por registro, con detección de etiquetas equivalentes. | O3 |
 | R5 | **Sesiones** según el alcance: última conversación, última sobre un tema, conversación de una fecha, y resumen al cerrar. | O2 |
 | R6 | **Evolución de registros.** Sustituir, invalidar y borrar definitivamente solo bajo petición explícita; el historial se puede consultar ("¿cómo ha cambiado mi horario de entreno?"). | O3 |
-| R7 | **Relaciones tipadas entre registros** (sustituye, contradice, relacionado, parte de) con estado de juicio (sugerida, confirmada, rechazada), inspiradas en Engram. Al guardar, el servidor detecta registros vigentes muy parecidos y los devuelve como posibles duplicados o contradicciones, con una relación sugerida, para que la IA decida. | O3 |
+| R7 | **Relaciones tipadas entre registros** (sustituye, contradice, relacionado, parte de) con estado de juicio (sugerida, confirmada, rechazada), inspiradas en Engram. Al guardar, el servidor devuelve como candidatas a revisar (`revisa:`) los registros vigentes de los mismos temas, los que comparten alguna palabra y los cercanos en significado, y la IA decide si son contradicción, relación o nada (cambio del 2026-10-16: antes solo se sugerían relaciones por parecido ≥ 0,92, que casi nunca se daba; ver `odd/tasks/lodan-lotes-relaciones.md`). | O3 |
 | R8 | **Sin duplicados.** Un registro equivalente a uno reciente no crea fila nueva, y un dato estable del mismo tema se actualiza en vez de duplicarse. | O2, O4 |
 | R9 | **Como máximo 6 herramientas MCP**, cada una con una descripción breve. | O2 |
 | R10 | **Degradación sin embeddings**, según el alcance. | O1, O5 |
