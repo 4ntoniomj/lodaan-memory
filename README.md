@@ -11,6 +11,7 @@ Memoria persistente local para asistentes de IA. Guarda decisiones, preferencias
 - [Comandos CLI](#comandos-cli)
 - [Backup y Restauración](#backup-y-restauración)
 - [Sincronización entre máquinas](#sincronización-entre-máquinas)
+- [Instalación en otro equipo y sincronización](#instalación-en-otro-equipo-y-sincronización)
 - [Hooks de los clientes de IA](#hooks-de-los-clientes-de-ia)
 - [Documentación técnica](#documentación-técnica)
 - [Arquitectura](#arquitectura)
@@ -490,6 +491,7 @@ Fuente: [`specs/001-nucleo-memoria/benchmark.md`](specs/001-nucleo-memoria/bench
 | 001 · Núcleo de memoria | [`specs/001-nucleo-memoria/verificacion.md`](specs/001-nucleo-memoria/verificacion.md): criterios cumplidos salvo el rendimiento a 10 millones (arriba) |
 | 002 · Instalador | [`specs/002-instalador/verificacion.md`](specs/002-instalador/verificacion.md): parcial en servicios (Windows y macOS) y en desinstalación con servicios, como indica la tabla de plataformas. La espera a Ollama ampliada a 3 min no se ha vuelto a probar desde cero |
 | 003 · Backup seguro | [`specs/003-backup-seguro/verificacion.md`](specs/003-backup-seguro/verificacion.md): criterios de aceptación cumplidos en Linux, incluida la convivencia con el servicio |
+| 004 · Hashtags y calidad (rama `feat/hashtags-calidad`, **pendiente de merge a `dev`**) | Implementada y desplegada en el equipo principal (binario del 2026-10-18). Cubre: 6 herramientas MCP actualizadas (tags y alias en `remember`, alias/verdict/alias-reject en `revise`, `merge` con vista previa y huella de 8 hex); skill `lodan-memoria 3.0.0` (tag families, preview, alias, verdict, merge, key `<etiqueta concreta>/<atributo>`); relación por rareza `Σ ln(N/n)` con umbral `tag_link_strength` configurable; sync con `lodan-sync/2` (aliases y verdicts viajan en el batch file); seed con 2 alias confirmados (`agm → agridemur`, `agm-repo → lodan-memoria`) y 39/39 contradicciones resueltas. Más detalle en [`odd/tasks/hashtags-y-calidad.md`](odd/tasks/hashtags-y-calidad.md) |
 
 ---
 
@@ -538,6 +540,148 @@ Este es un proyecto personal. Las sugerencias, reportes de bugs y PRs se reciben
 
 ---
 
+## Instalación en otro equipo y sincronización
+
+Para tener lodan en un segundo ordenador con la **misma versión del binario** y la **base de datos sincronizada** por git.
+
+### 0. Prerrequisitos en el equipo nuevo
+
+- **Go ≥ 1.25.0** (con `GOTOOLCHAIN=auto` baja toolchain 1.27.1 sola).
+- **git** con acceso por SSH al repo `git@github.com:4ntoniomj/lodan.sync.git` (el mismo repo privado que ya usas; añadir tu clave pública al repo).
+- Sin PostgreSQL ni Ollama: `lodan install` los descarga.
+
+### 1. Clonar el repo en una versión exacta
+
+Clona el repo del binario (`lodaan-memory`, NO `lodan.sync`) y haz checkout al commit que quieras usar. Para una versión estable, una **tag** o el HEAD de una rama estable:
+
+```bash
+git clone https://github.com/4ntoniomj/lodaan-memory.git
+cd lodaan-memory
+git checkout <commit o tag>
+```
+
+Para tener la última estable de esta fecha:
+
+```bash
+git checkout main   # o la rama que Antonio indique tras el merge
+```
+
+### 2. Compilar el binario
+
+```bash
+go build -o lodan.exe ./cmd/lodan    # Windows
+# o
+go build -o lodan ./cmd/lodan       # Linux/macOS
+```
+
+Verifica el SHA-256 del binario con el del equipo original:
+
+```bash
+sha256sum lodan.exe   # Linux/macOS
+certutil -hashfile lodan.exe SHA256   # Windows
+```
+
+Coincide con el hash del binario instalado en el otro equipo (`C:\Users\4ntoniomj\AppData\Local\lodan\bin\lodan.exe` o el equivalente).
+
+### 3. Instalar lodan en el equipo nuevo
+
+```bash
+./lodan install --yes
+```
+
+Esto descarga PostgreSQL y Ollama si hace falta, crea el clúster local, aplica las migraciones, registra el servicio `lodan` y configura los clientes MCP que detecte (Claude Code, opencode, Antigravity, etc.). Si ya tenías una instalación previa en esa máquina, `--skip-ollama --skip-service --skip-clients` reutiliza lo que ya estaba al día.
+
+Tras la instalación, verifica:
+
+```bash
+./lodan doctor    # 14/14 ok, 0 errores, 0 avisos
+./lodan status
+```
+
+### 4. Copiar la clave de sync desde el equipo original
+
+La clave de cifrado de los ficheros de sync (X25519 de `age`) **se queda en una sola máquina** y se copia al nuevo equipo por un canal seguro (gestor de contraseñas, USB). **Nunca va al repositorio git**.
+
+En el equipo original:
+
+```bash
+lodan doctor    # muestra la ruta: por defecto C:\Users\4ntoniomj\AppData\Roaming\lodan\sync.key (Windows) o ~/.config/lodan/sync.key (Linux)
+```
+
+El fichero tiene una sola línea: `AGE-SECRET-KEY-1…`. Cópiala al equipo nuevo en la misma ruta (o usa `--key <ruta>` al inicializar).
+
+### 5. Inicializar el sync en el equipo nuevo
+
+```bash
+./lodan sync init --repo git@github.com:4ntoniomj/lodan.sync.git --machine <id-unico>
+```
+
+El `--machine` es el identificador de esta máquina en la sincronización (cada máquina escribe en su propia carpeta `changes/<machine>/`). Ejemplos: `pc-portatil`, `servidor-casa`, `oficina`. Tiene que ser distinto al del equipo original.
+
+`init` clona el repo de sync en `<datos>/sync-repo`, guarda la ruta, el id de máquina y la ruta de la clave en `config.json`. Si ya existe la clave en la ruta esperada, la reutiliza.
+
+### 6. Traer los datos del otro equipo
+
+```bash
+./lodan sync pull
+```
+
+Aplica los ficheros cifrados del otro equipo: crea los registros, alias, relaciones y veredictos que ya tienes. Las contradicciones y registros ya resueltos en el otro equipo **no reaparecen** porque el formato `/2` lleva `verdict` y `confidence` y la re-tiqueta automática de alias funciona out-of-the-box.
+
+### 7. Mandar tus primeros cambios y programar el sync
+
+```bash
+./lodan sync push             # envía tus primeros cambios locales al repo
+./lodan sync schedule --every 15   # tarea de tu usuario: push+pull cada 15 minutos
+```
+
+Con `--every 15` se crea (sin admin):
+- **Windows**: tarea programada `lodan-sync` que corre solo con tu sesión iniciada.
+- **Linux**: timer `lodan-sync.timer` de `systemd --user`.
+- **macOS**: LaunchAgent `com.lodan.sync`.
+
+Logs en `<datos>/logs/sync.log`. La tarea corre con tus credenciales de git (no las del servicio `lodan`, que va con LocalSystem).
+
+### 8. Configurar los hooks de los clientes MCP
+
+Si quieres que los clientes (Claude Code, opencode, Antigravity) también tengan la skill `lodan-memoria 3.0.0` y los hooks:
+
+```bash
+./lodan install --only <cliente>    # repetir por cliente
+```
+
+O más agresivo (recomendado tras sync inicial):
+
+```bash
+./lodan install --yes --skip-ollama --skip-service --skip-postgresql
+```
+
+Verifica con `./lodan doctor` que la skill está al día en `~/.claude/skills/lodan-memoria` (o la ruta equivalente del cliente).
+
+### Resumen rápido (TL;DR)
+
+```bash
+# En el equipo original:
+sha256sum lodan.exe > lodan.exe.sha256    # anota el hash para comparar
+lodan sync schedule --every 15            # asegúrate de que el sync sigue corriendo
+
+# En el equipo nuevo:
+git clone https://github.com/4ntoniomj/lodaan-memory.git
+cd lodaan-memory && git checkout <commit>
+go build -o lodan.exe ./cmd/lodan
+sha256sum lodan.exe     # debe coincidir con el original
+./lodan install --yes
+# (copia sync.key desde el original)
+./lodan sync init --repo git@github.com:4ntoniomj/lodan.sync.git --machine <id>
+./lodan sync pull
+./lodan sync push
+./lodan sync schedule --every 15
+./lodan doctor    # 14/14 ok
+```
+
+---
+
 **Última actualización:** 2026-10-18  
+**Rama principal:** `dev` (la nueva versión estable `feat/hashtags-calidad` está lista para merge; main no existe en el repo, ver `Estado del proyecto`)
 **Repositorio:** https://github.com/4ntoniomj/lodaan-memory  
 **Autor:** Antonio (con Claude como orquestador)
