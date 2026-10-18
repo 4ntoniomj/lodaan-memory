@@ -38,11 +38,17 @@ type lockedMemory struct {
 //   - verdict: applies r.Verdict ("r.ID <verdict> r.WithID") when r.Confidence
 //     reaches 0.7, or stores it as a suggested relation otherwise; the
 //     relation row keeps the verdict and the confidence.
+//   - merge: joins ≥2 active records (r.IDs) into one new record with the AI's
+//     title, content and tags; without Confirm it returns a preview that does
+//     not write anything; with Confirm and a matching Fingerprint it creates
+//     the new record, moves the first non-empty key, copies every relation of
+//     the originals except those among them, and marks every original as
+//     superseded by the new one (history kept). No id needed.
 //
 // tr may be nil; otherwise activity is recorded on its session.
 func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (string, error) {
 	action := strings.ToLower(strings.TrimSpace(r.Action))
-	if r.ID <= 0 && action != "alias" && action != "reject_alias" {
+	if r.ID <= 0 && action != "alias" && action != "reject_alias" && action != "merge" {
 		return "", errors.New("hay que indicar el id del registro")
 	}
 	if tr != nil {
@@ -72,8 +78,10 @@ func (s *Service) Revise(ctx context.Context, tr *session.Tracker, r Revision) (
 		return s.rejectAlias(ctx, r)
 	case "verdict":
 		return s.verdict(ctx, r)
+	case "merge":
+		return s.merge(ctx, r)
 	default:
-		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict)", r.Action)
+		return "", fmt.Errorf("acción %q no válida (válidas: update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict, merge)", r.Action)
 	}
 }
 

@@ -113,7 +113,7 @@ var kindNames = []string{
 	string(memory.KindEvent), string(memory.KindNote),
 }
 
-var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation", "alias", "reject_alias", "verdict"}
+var reviseActions = []string{"update", "supersede", "invalidate", "delete", "relate", "confirm_relation", "reject_relation", "alias", "reject_alias", "verdict", "merge"}
 
 var relationKinds = []string{"related", "contradicts", "part_of", "supersedes"}
 

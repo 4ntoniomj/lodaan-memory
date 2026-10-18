@@ -269,13 +269,15 @@ type reviseInput struct {
 	Action   string     `json:"action,omitempty" jsonschema:"Acción a aplicar"`
 	WithID   int64      `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
 	Relation string     `json:"relation,omitempty" jsonschema:"Tipo de relación (por defecto related)"`
-	Title    string     `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
-	Content  string     `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
+	Title    string     `json:"title,omitempty" jsonschema:"Título nuevo (update) o del registro junto (merge)"`
+	Content  string     `json:"content,omitempty" jsonschema:"Contenido nuevo (update) o del registro junto (merge)"`
 	Tag      string     `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
 	WithTag  string     `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
-	Tags     []string   `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8); reemplazan a las actuales"`
+	Tags     []string   `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, merge, máx. 8); reemplazan a las actuales en update; en merge son las del registro junto"`
 	Topics   []string   `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
-	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
+	Confirm  bool       `json:"confirm,omitempty" jsonschema:"true para confirmar delete o el commit de merge"`
+	IDs      []int64    `json:"ids,omitempty" jsonschema:"Registros a juntar (merge, ≥2, en el orden del resultado); id no se usa"`
+	Fingerprint string  `json:"fingerprint,omitempty" jsonschema:"Huella de 8 hex devuelta por la vista previa de merge; obligatoria con confirm en merge"`
 	Ops      []reviseOp `json:"ops,omitempty" jsonschema:"Varias operaciones en una sola llamada (máx. 200 en total), con los mismos campos; se aplican en orden y una que falle no frena las demás"`
 
 	// Verdict and Confidence are the inputs of verdict; Confidence is a
@@ -286,17 +288,19 @@ type reviseInput struct {
 
 // reviseOp is one operation of the revise tool.
 type reviseOp struct {
-	ID       int64    `json:"id,omitempty" jsonschema:"Id del registro (no hace falta en alias ni reject_alias)"`
-	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias o verdict"`
+	ID       int64    `json:"id,omitempty" jsonschema:"Id del registro (no hace falta en alias, reject_alias ni merge)"`
+	Action   string   `json:"action" jsonschema:"update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict o merge"`
 	WithID   int64    `json:"with_id,omitempty" jsonschema:"Otro registro: el que sustituye (supersede) o con el que se relaciona"`
 	Relation string   `json:"relation,omitempty" jsonschema:"related, contradicts, part_of o supersedes (por defecto related)"`
-	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update)"`
-	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update)"`
+	Title    string   `json:"title,omitempty" jsonschema:"Título nuevo (update) o del registro junto (merge)"`
+	Content  string   `json:"content,omitempty" jsonschema:"Contenido nuevo (update) o del registro junto (merge)"`
 	Tag      string   `json:"tag,omitempty" jsonschema:"Etiqueta que es alias (alias, reject_alias)"`
 	WithTag  string   `json:"with_tag,omitempty" jsonschema:"Etiqueta canónica (alias) o distinta (reject_alias)"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, máx. 8)"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Etiquetas nuevas (update, merge, máx. 8)"`
 	Topics   []string `json:"topics,omitempty" jsonschema:"Igual que tags (se juntan)"`
-	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete"`
+	Confirm  bool     `json:"confirm,omitempty" jsonschema:"true para confirmar delete o el commit de merge"`
+	IDs      []int64  `json:"ids,omitempty" jsonschema:"Registros a juntar (merge, ≥2, en el orden del resultado); id no se usa"`
+	Fingerprint string `json:"fingerprint,omitempty" jsonschema:"Huella de 8 hex devuelta por la vista previa de merge; obligatoria con confirm en merge"`
 
 	// Verdict and Confidence are the inputs of verdict; Confidence is a
 	// pointer so a missing value can be told apart from 0.
@@ -306,9 +310,10 @@ type reviseOp struct {
 
 func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in reviseInput) (*mcp.CallToolResult, any, error) {
 	var ops []reviseOp
-	if in.ID != 0 || in.Action != "" || in.Tag != "" || in.WithTag != "" {
+	if in.ID != 0 || in.Action != "" || in.Tag != "" || in.WithTag != "" || len(in.IDs) > 0 {
 		ops = append(ops, reviseOp{ID: in.ID, Action: in.Action, WithID: in.WithID, Relation: in.Relation,
 			Title: in.Title, Content: in.Content, Tag: in.Tag, WithTag: in.WithTag, Tags: in.Tags, Topics: in.Topics, Confirm: in.Confirm,
+			IDs: in.IDs, Fingerprint: in.Fingerprint,
 			Verdict: in.Verdict, Confidence: in.Confidence})
 	}
 	ops = append(ops, in.Ops...)
@@ -335,6 +340,8 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 			Tags:     op.Tags,
 			Topics:   op.Topics,
 			Confirm:  op.Confirm,
+			IDs:      op.IDs,
+			Fingerprint: op.Fingerprint,
 
 			Verdict:    op.Verdict,
 			Confidence: op.Confidence,

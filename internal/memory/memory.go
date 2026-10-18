@@ -175,7 +175,7 @@ type Full struct {
 // Revision describes a change to an existing record; see Service.Revise.
 type Revision struct {
 	ID     int64
-	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict
+	Action string // update, supersede, invalidate, delete, relate, confirm_relation, reject_relation, alias, reject_alias, verdict, merge
 	WithID int64
 	// Relation is the relation kind for relate, confirm_relation and reject_relation.
 	Relation string
@@ -186,12 +186,17 @@ type Revision struct {
 	// Tags and Topics are the new tags for update, joined (tags first).
 	Tags   []string
 	Topics []string
-	// Confirm must be true for delete.
+	// Confirm must be true for delete and to commit a merge preview.
 	Confirm bool
 	// Verdict (contradice, sustituye, compatible, no_relacionado) and
 	// Confidence (0..1, required; nil means missing) are the inputs of verdict.
 	Verdict    string
 	Confidence *float64
+	// IDs are the records to merge (≥2). For merge only; ID is not needed.
+	IDs []int64
+	// Fingerprint is the 8-char hex fingerprint returned by a merge preview,
+	// required with Confirm to commit a merge.
+	Fingerprint string
 }
 
 // Service saves, revises and reads memory records. It is safe for concurrent use.
