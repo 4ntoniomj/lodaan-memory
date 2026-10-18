@@ -67,12 +67,12 @@ func NewServer(d Deps) *Server {
 // Tool descriptions. Each character is paid in tokens by every session, so they
 // are short (at most 200 characters).
 const (
-	descRemember = "Guarda registros (máx. 200 por llamada). Deduplica, resuelve temas, crea las relaciones de relate y lista con «revisa:» registros a comprobar por si contradicen o se relacionan."
-	descRecall   = "Recupera lo relevante para una o varias preguntas (queries, máx. 200) en lenguaje natural: ficha del tema, últimos eventos y resultados. Llámala en cuanto surja un tema."
-	descGet      = "Devuelve el contenido completo y las relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
-	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm) o relaciones (relate, confirm_relation, reject_relation, verdict)."
+	descRemember = "Guarda registros (máx. 200 por llamada) con etiquetas (#coche-1234abc generales y concretas, máx. 8). Deduplica, resuelve etiquetas y alias, crea las relaciones de relate y lista con «revisa:» registros a comprobar. Con `preview: true` corre todas las comprobaciones sin guardar nada; úsalo antes de guardar algo caro."
+	descRecall   = "Recupera lo relevante para una o varias preguntas (queries, máx. 200) en lenguaje natural: ficha del tema, últimos eventos y resultados. Sigue las etiquetas concretas y trae lo conectado por etiquetas en una sola llamada. Llámala en cuanto surja un tema."
+	descGet      = "Devuelve el contenido completo, etiquetas, clave y relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
+	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm); relaciones (relate, confirm_relation, reject_relation); etiquetas (alias, reject_alias); veredictos sobre conflictos (verdict, con confianza); o junta registros repetidos en uno nuevo (merge, con vista previa y huella)."
 	descSession  = "Consulta o cierra conversaciones, una o varias en ops (máx. 200): last (filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
-	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones y Ollama."
+	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones, Ollama, alias confirmados y pendientes, contradicciones abiertas y veredictos pendientes."
 )
 
 // register adds the six tools to srv. The input schemas are inferred from the

@@ -1,6 +1,6 @@
 # Codebase
 
-Última actualización: 2026-10-17
+Última actualización: 2026-10-18
 
 | Tecnología | Tipo | Versión | Notas |
 | :--- | :--- | :--- | :--- |
@@ -38,7 +38,7 @@ Estado actual de cada funcionalidad en `internal/`:
 
 ### Sincronización entre máquinas
 
-**Ubicación:** `internal/gitsync/` (CLI `lodan sync`, migración `0003_sync.sql`). Exporta los cambios locales a ficheros por lotes cifrados con age en un repositorio git, uno por máquina, e importa los de las demás con reglas de fusión deterministas. Ver `internal/gitsync/CLAUDE.md`.
+**Ubicación:** `internal/gitsync/` (CLI `lodan sync`, migraciones `0003_sync.sql` y `0004_tags.sql`). Exporta los cambios locales a ficheros por lotes cifrados con age en un repositorio git, uno por máquina, e importa los de las demás con reglas de fusión deterministas. El formato del fichero es `lodan-sync/1` por defecto; cuando el lote lleva al menos un alias confirmado o rechazado (las sugerencias se quedan locales), el writer emite `lodan-sync/2`. El reader acepta ambos. Las líneas de relación llevan el veredicto y la confianza cuando los hay (`verdict`, `confidence`); los alias son last-write-wins por `updated_at` y, cuando entra un alias `confirmed`, los records locales que tenían la etiqueta original se reetiquetan al canónico. Ver `internal/gitsync/CLAUDE.md`.
 
 ### Hooks de los clientes de IA
 
@@ -112,10 +112,10 @@ La parada de PostgreSQL dura lo que tarda la copia (pasos 4 a 7) y el destino ne
 
 ### Otros módulos
 
-- **memory:** Guardar registros (`internal/memory/`).
-- **recall:** Búsqueda por tema (`internal/recall/`).
-- **topic:** Gestión de etiquetas y temas (`internal/topic/`).
+- **memory:** Guardar y revisar registros (`internal/memory/`). Además de `remember`, `get` y `revise` (con `update`, `supersede`, `invalidate`, `delete`, `relate`, `confirm_relation`, `reject_relation`, `alias`, `reject_alias`, `verdict`, `merge`), incluye la vista previa de `remember` (`preview: true`), la sugerencia de clave (`<etiqueta concreta>/<atributo>`), el veredicto de conflictos con su confianza y el merge con huella de 8 hex para juntar duplicados.
+- **recall:** Búsqueda por tema (`internal/recall/`); al final de cada pregunta muestra los registros conectados por las etiquetas concretas del primer resultado, con fuerza `Σ ln(N/n)` y umbral configurable (`tag_link_strength`, por defecto 3.0).
+- **topic:** Resolución de etiquetas (`internal/topic/`), alias confirmados, sugerencias de alias, igualdad sin guiones (`coche-4860-ngl` = `coche-4860ngl`) y deduplicación. Sin fusión por parecido.
 - **session:** Sesiones y contexto (`internal/session/`).
 - **embedding:** Cálculo y búsqueda de embeddings vía Ollama (`internal/embedding/`).
-- **mcptools:** Definición de herramientas MCP (`internal/mcptools/`).
-- **config:** Configuración global (`internal/config/`).
+- **mcptools:** Definición de herramientas MCP (`internal/mcptools/`) — `remember`, `recall`, `get`, `revise`, `session` y `status` (siempre seis, ninguna más). Las descripciones de cada herramienta están en este paquete, no en la skill.
+- **config:** Configuración global (`internal/config/`); añade `tag_link_strength` para el umbral de conexión por rareza.
