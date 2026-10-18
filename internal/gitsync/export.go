@@ -77,12 +77,16 @@ func Export(ctx context.Context, pool *pgxpool.Pool, opts ExportOptions) (Export
 	if err != nil {
 		return ExportResult{}, err
 	}
+	aliases, err := exportAliases(ctx, tx, cur, prevArg)
+	if err != nil {
+		return ExportResult{}, err
+	}
 
 	res := ExportResult{Memories: len(memories), Relations: len(relations), Sessions: len(sessions), Deletions: len(deletions)}
 	if err := writeState(ctx, tx, stateExportSnapshot, cur); err != nil {
 		return ExportResult{}, err
 	}
-	if res.Memories+res.Relations+res.Sessions+res.Deletions == 0 {
+	if res.Memories+res.Relations+res.Sessions+res.Deletions+len(aliases) == 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return ExportResult{}, fmt.Errorf("no se pudo guardar el estado de la exportación: %w", err)
 		}
@@ -116,8 +120,14 @@ func Export(ctx context.Context, pool *pgxpool.Pool, opts ExportOptions) (Export
 	now := time.Now().UTC()
 	rel := "changes/" + opts.MachineID + "/" + fileName(now, seq)
 	path := filepath.Join(opts.Dir, filepath.FromSlash(rel))
-	hdr := headerLine{Type: typeHeader, Format: Format, Machine: opts.MachineID, CreatedAt: now}
-	if err := writeBatch(path, recipient, hdr, sessions, memories, relations, deletions); err != nil {
+	// The batch file uses FormatV2 only when it carries alias lines; otherwise
+	// it stays in Format so machines that have not picked up typeAlias still read it.
+	format := Format
+	if len(aliases) > 0 {
+		format = FormatV2
+	}
+	hdr := headerLine{Type: typeHeader, Format: format, Machine: opts.MachineID, CreatedAt: now}
+	if err := writeBatch(path, recipient, hdr, sessions, memories, relations, deletions, aliases); err != nil {
 		return ExportResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -161,7 +171,8 @@ func exportMemories(ctx context.Context, tx pgx.Tx, cur string, prev any) ([]mem
 }
 
 func exportRelations(ctx context.Context, tx pgx.Tx, cur string, prev any) ([]relationLine, error) {
-	rows, err := tx.Query(ctx, `SELECT s.sync_id::text, g.sync_id::text, r.kind::text, r.state::text, r.created_at, r.updated_at
+	rows, err := tx.Query(ctx, `SELECT s.sync_id::text, g.sync_id::text, r.kind::text, r.state::text,
+			COALESCE(r.verdict, ''), COALESCE(r.confidence, 0)::float8, r.created_at, r.updated_at
 		FROM memory_relations r JOIN memories s ON s.id = r.source_id JOIN memories g ON g.id = r.target_id
 		WHERE `+fmt.Sprintf(changedSQL, "r")+` ORDER BY r.created_at, s.id, g.id`, cur, prev)
 	if err != nil {
@@ -169,7 +180,7 @@ func exportRelations(ctx context.Context, tx pgx.Tx, cur string, prev any) ([]re
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (relationLine, error) {
 		l := relationLine{Type: typeRelation}
-		err := r.Scan(&l.Source, &l.Target, &l.Kind, &l.State, &l.CreatedAt, &l.UpdatedAt)
+		err := r.Scan(&l.Source, &l.Target, &l.Kind, &l.State, &l.Verdict, &l.Confidence, &l.CreatedAt, &l.UpdatedAt)
 		return l, err
 	})
 }
@@ -187,9 +198,27 @@ func exportDeletions(ctx context.Context, tx pgx.Tx, cur string, prev any) ([]de
 	})
 }
 
+// exportAliases reads every confirmed and rejected tag alias whose last local
+// change is between prev and cur. Suggested aliases stay local: the trigger
+// sets their sync_xid to NULL, so changedSQL skips them.
+func exportAliases(ctx context.Context, tx pgx.Tx, cur string, prev any) ([]aliasLine, error) {
+	rows, err := tx.Query(ctx, `SELECT alias, canonical, state::text, updated_at
+		FROM tag_aliases
+		WHERE state <> 'suggested' AND `+fmt.Sprintf(changedSQL, "tag_aliases")+`
+		ORDER BY alias, canonical`, cur, prev)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudieron leer los alias: %w", err)
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (aliasLine, error) {
+		l := aliasLine{Type: typeAlias}
+		err := r.Scan(&l.Alias, &l.Canonical, &l.State, &l.UpdatedAt)
+		return l, err
+	})
+}
+
 // writeBatch encrypts the batch to path, through a temporary file renamed at the end.
 func writeBatch(path string, recipient age.Recipient, hdr headerLine, sessions []sessionLine, memories []memoryLine,
-	relations []relationLine, deletions []deletionLine) (err error) {
+	relations []relationLine, deletions []deletionLine, aliases []aliasLine) (err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("no se pudo crear la carpeta de cambios: %w", err)
 	}
@@ -223,6 +252,9 @@ func writeBatch(path string, recipient age.Recipient, hdr headerLine, sessions [
 		put(l)
 	}
 	for _, l := range relations {
+		put(l)
+	}
+	for _, l := range aliases {
 		put(l)
 	}
 	for _, l := range deletions {

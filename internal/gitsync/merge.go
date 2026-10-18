@@ -533,9 +533,13 @@ func (a *applier) applyRelation(ctx context.Context, in relationLine) error {
 		return fmt.Errorf("no se pudieron buscar los registros de la relación: %w", err)
 	}
 	if srcID == 0 || dstID == 0 {
+		// sync_pending_relations has no verdict/confidence columns yet (a future
+		// migration could add them); the verdict and confidence are applied when
+		// the missing record arrives and the pending row is replayed.
 		_, err := a.tx.Exec(ctx, `INSERT INTO sync_pending_relations (source, target, kind, state, created_at, updated_at)
 			VALUES ($1::uuid, $2::uuid, $3::text::relation_kind, $4::text::relation_state, $5, $6)
-			ON CONFLICT (source, target, kind) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+			ON CONFLICT (source, target, kind) DO UPDATE SET state = EXCLUDED.state,
+				updated_at = EXCLUDED.updated_at
 			WHERE sync_pending_relations.updated_at < EXCLUDED.updated_at`,
 			in.Source, in.Target, in.Kind, in.State, in.CreatedAt, in.UpdatedAt)
 		if err != nil {
@@ -543,15 +547,110 @@ func (a *applier) applyRelation(ctx context.Context, in relationLine) error {
 		}
 		return nil
 	}
-	_, err = a.tx.Exec(ctx, `INSERT INTO memory_relations AS r (source_id, target_id, kind, state, created_at, updated_at)
-		VALUES ($1, $2, $3::text::relation_kind, $4::text::relation_state, $5, $6)
-		ON CONFLICT (source_id, target_id, kind) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+	_, err = a.tx.Exec(ctx, `INSERT INTO memory_relations AS r (source_id, target_id, kind, state, verdict, confidence, created_at, updated_at)
+		VALUES ($1, $2, $3::text::relation_kind, $4::text::relation_state, $5, $6, $7, $8)
+		ON CONFLICT (source_id, target_id, kind) DO UPDATE SET state = EXCLUDED.state, verdict = EXCLUDED.verdict,
+			confidence = EXCLUDED.confidence, updated_at = EXCLUDED.updated_at
 		WHERE r.updated_at < EXCLUDED.updated_at`,
-		srcID, dstID, in.Kind, in.State, in.CreatedAt, in.UpdatedAt)
+		srcID, dstID, in.Kind, in.State, nullStr(in.Verdict), in.Confidence, in.CreatedAt, in.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("no se pudo importar la relación: %w", err)
 	}
 	return nil
+}
+
+// nullStr returns nil when s is empty so the column stores NULL instead of ''.
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// applyAlias upserts the alias row, with last-write-wins by updated_at. When
+// the alias is confirmed it retags the local records: every memory_topics
+// pointing to the alias's topic gains the canonical's topic (creating it on
+// conflict), then the alias's topic is deactivated on those records.
+func (a *applier) applyAlias(ctx context.Context, in aliasLine) error {
+	// Last-write-wins on (alias, updated_at) for the whole alias: any older
+	// local row with the same alias is replaced, the UNIQUE INDEX on
+	// tag_aliases_confirmed (alias WHERE state='confirmed') cannot fire.
+	rows, err := a.tx.Query(ctx, `SELECT alias, canonical, state::text, updated_at
+		FROM tag_aliases WHERE alias = $1 FOR UPDATE`, in.Alias)
+	if err != nil {
+		return fmt.Errorf("no se pudo bloquear el alias %s: %w", in.Alias, err)
+	}
+	var newest aliasLine
+	newest.UpdatedAt = time.Time{}
+	for rows.Next() {
+		var l aliasLine
+		if err := rows.Scan(&l.Alias, &l.Canonical, &l.State, &l.UpdatedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		if l.UpdatedAt.After(newest.UpdatedAt) {
+			newest = l
+		}
+	}
+	rows.Close()
+	if !newest.UpdatedAt.IsZero() && !in.UpdatedAt.After(newest.UpdatedAt) {
+		return nil
+	}
+	if _, err := a.tx.Exec(ctx, `DELETE FROM tag_aliases WHERE alias = $1`, in.Alias); err != nil {
+		return fmt.Errorf("no se pudo limpiar el alias %s: %w", in.Alias, err)
+	}
+	if _, err := a.tx.Exec(ctx, `INSERT INTO tag_aliases (alias, canonical, state, updated_at)
+		VALUES ($1, $2, $3::text, $4)`, in.Alias, in.Canonical, in.State, in.UpdatedAt); err != nil {
+		return fmt.Errorf("no se pudo guardar el alias %s → %s: %w", in.Alias, in.Canonical, err)
+	}
+	if in.State != "confirmed" {
+		return nil
+	}
+	aliasID, err := a.topicID(ctx, in.Alias)
+	if err != nil {
+		return err
+	}
+	canonicalID, err := a.topicID(ctx, in.Canonical)
+	if err != nil {
+		return err
+	}
+	// Ensure every record carrying the alias gains the canonical (no duplicates).
+	if _, err := a.tx.Exec(ctx, `INSERT INTO memory_topics (memory_id, topic_id, kind, active, ts)
+		SELECT mt.memory_id, $2, mt.kind, true, now()
+		FROM memory_topics mt
+		WHERE mt.topic_id = $1 AND mt.active
+		ON CONFLICT (memory_id, topic_id) DO UPDATE SET active = true, ts = EXCLUDED.ts`,
+		aliasID, canonicalID); err != nil {
+		return fmt.Errorf("no se pudo reetiquetar con %s: %w", in.Canonical, err)
+	}
+	// Deactivate the alias on every record; the canonical now does the work.
+	if _, err := a.tx.Exec(ctx, `UPDATE memory_topics SET active = false WHERE topic_id = $1 AND active`, aliasID); err != nil {
+		return fmt.Errorf("no se pudo desactivar el alias %s: %w", in.Alias, err)
+	}
+	return nil
+}
+
+// topicID returns the id of the topic with the given slug, creating it when
+// missing (its embedding is computed later by the maintenance worker). It
+// mirrors the topicIDs cache used by memory apply.
+func (a *applier) topicID(ctx context.Context, slug string) (int32, error) {
+	if slug == "" {
+		return 0, fmt.Errorf("el slug no puede estar vacío")
+	}
+	if id, ok := a.topics[slug]; ok {
+		return id, nil
+	}
+	var id int32
+	if err := a.tx.QueryRow(ctx, `INSERT INTO topics (slug) VALUES ($1)
+		ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
+		RETURNING id`, slug).Scan(&id); err != nil {
+		return 0, fmt.Errorf("no se pudo preparar el tema %s: %w", slug, err)
+	}
+	if a.topics == nil {
+		a.topics = map[string]int32{}
+	}
+	a.topics[slug] = id
+	return id, nil
 }
 
 // retryPendingRelations applies the waiting relations whose records have arrived.

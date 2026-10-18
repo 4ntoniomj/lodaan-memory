@@ -172,6 +172,11 @@ func applyFile(ctx context.Context, pool *pgxpool.Pool, rel string, b batch) ([]
 				return err
 			}
 		}
+		for _, l := range b.aliases {
+			if err := a.applyAlias(ctx, l); err != nil {
+				return err
+			}
+		}
 		for _, l := range b.deletions {
 			if err := a.applyDeletion(ctx, l); err != nil {
 				return err

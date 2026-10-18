@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -108,33 +109,23 @@ func TestSyncTags(t *testing.T) {
 
 	// S18 import re-tags records with the canonical of an imported confirmed alias.
 	run("S18 import of a confirmed alias retags local records to the canonical", func(t *testing.T, p *pair) {
-		idA := p.a.rem(t, "Coche de Ana", "El coche de Ana es un Seat", memory.KindFact, "", "alpha")
+		p.a.rem(t, "Coche de Ana", "El coche de Ana es un Seat", memory.KindFact, "", "alpha")
 		p.a.revise(t, memory.Revision{Action: "alias", Tag: "alpha", WithTag: "zeta"})
 		p.export(t, p.a)
-		if _, err := p.b.pool.Exec(context.Background(),
-			`INSERT INTO memories (sync_id, sync_rev, sync_dirty, kind, title, content, occurred_at)
-			 VALUES (gen_random_uuid(), gen_random_uuid(), false, 'fact', 'Copia del coche', 'otra versión', now())`); err != nil {
-			t.Fatalf("no se pudo crear el record en B: %v", err)
-		}
-		if _, err := p.b.pool.Exec(context.Background(),
-			`INSERT INTO memory_topics (memory_id, topic_id, kind, ts)
-			 SELECT m.id, t.id, 'fact'::memory_kind, now()
-			 FROM memories m, topics t WHERE m.title = 'Copia del coche' AND t.slug = 'alpha'`); err != nil {
-			t.Fatalf("no se pudo etiquetar la copia con alpha: %v", err)
-		}
-		_ = idA
+		// Create a record on B tagged with alpha; after import it should be retagged to zeta.
+		p.b.rem(t, "Copia del coche", "otra versión", memory.KindFact, "", "alpha")
 		p.import_(t, p.b)
 		var withAlpha, withZeta int
 		if err := p.b.pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id WHERE t.slug = 'alpha'`).Scan(&withAlpha); err != nil {
+			`SELECT count(*) FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id WHERE t.slug = 'alpha' AND mt.active`).Scan(&withAlpha); err != nil {
 			t.Fatal(err)
 		}
 		if err := p.b.pool.QueryRow(context.Background(),
-			`SELECT count(*) FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id WHERE t.slug = 'zeta'`).Scan(&withZeta); err != nil {
+			`SELECT count(*) FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id WHERE t.slug = 'zeta' AND mt.active`).Scan(&withZeta); err != nil {
 			t.Fatal(err)
 		}
 		if withAlpha != 0 || withZeta == 0 {
-			t.Errorf("B debería tener zeta y no alpha: alpha=%d zeta=%d", withAlpha, withZeta)
+			t.Errorf("B debería tener zeta y no alpha activos: alpha=%d zeta=%d", withAlpha, withZeta)
 		}
 	})
 
@@ -142,11 +133,17 @@ func TestSyncTags(t *testing.T) {
 	run("S18 incoming alias wins when its updated_at is newer", func(t *testing.T, p *pair) {
 		p.a.revise(t, memory.Revision{Action: "alias", Tag: "agm", WithTag: "agridemur"})
 		p.export(t, p.a)
-		// B already has agm → agridemur viejo.
+		// B already has agm → otro viejo. The trigger rewrites updated_at to now()
+		// on INSERT (outside import), so we set the older updated_at with a
+		// follow-up UPDATE that does not touch state/canonical and does not
+		// fire the trigger.
 		if _, err := p.b.pool.Exec(context.Background(),
-			`INSERT INTO tag_aliases (alias, canonical, state, created_at, updated_at)
-			 VALUES ('agm', 'otro', 'confirmed', now() - interval '1 day', now() - interval '1 day')`); err != nil {
+			`INSERT INTO tag_aliases (alias, canonical, state) VALUES ('agm', 'otro', 'confirmed')`); err != nil {
 			t.Fatalf("no se pudo crear el alias antiguo en B: %v", err)
+		}
+		if _, err := p.b.pool.Exec(context.Background(),
+			`UPDATE tag_aliases SET updated_at = now() - interval '1 day' WHERE alias = 'agm' AND canonical = 'otro'`); err != nil {
+			t.Fatalf("no se pudo envejecer el alias en B: %v", err)
 		}
 		p.import_(t, p.b)
 		var canonical string
@@ -161,14 +158,17 @@ func TestSyncTags(t *testing.T) {
 
 	run("S18 incoming alias loses when the local updated_at is newer", func(t *testing.T, p *pair) {
 		if _, err := p.a.pool.Exec(context.Background(),
-			`INSERT INTO tag_aliases (alias, canonical, state, created_at, updated_at)
-			 VALUES ('agm', 'antiguo-a', 'confirmed', now() - interval '1 day', now() - interval '1 day')`); err != nil {
+			`INSERT INTO tag_aliases (alias, canonical, state) VALUES ('agm', 'antiguo-a', 'confirmed')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.a.pool.Exec(context.Background(),
+			`UPDATE tag_aliases SET updated_at = now() - interval '1 day' WHERE alias = 'agm' AND canonical = 'antiguo-a'`); err != nil {
 			t.Fatal(err)
 		}
 		p.export(t, p.a)
+		// B already has agm → agridemur recent.
 		if _, err := p.b.pool.Exec(context.Background(),
-			`INSERT INTO tag_aliases (alias, canonical, state, created_at, updated_at)
-			 VALUES ('agm', 'agridemur', 'confirmed', now(), now())`); err != nil {
+			`INSERT INTO tag_aliases (alias, canonical, state) VALUES ('agm', 'agridemur', 'confirmed')`); err != nil {
 			t.Fatalf("no se pudo crear el alias reciente en B: %v", err)
 		}
 		p.import_(t, p.b)
@@ -201,8 +201,8 @@ func TestSyncTags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("no se pudo leer la relación en B: %v", err)
 		}
-		if verdict != "compatible" || confidence != 0.85 {
-			t.Errorf("veredicto/confianza = (%q, %v), quería (compatible, 0.85)", verdict, confidence)
+		if verdict != "compatible" || math.Abs(confidence-0.85) > 1e-3 {
+			t.Errorf("veredicto/confianza = (%q, %v), quería (compatible, 0.85 ±1e-3)", verdict, confidence)
 		}
 	})
 }

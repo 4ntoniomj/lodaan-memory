@@ -18,6 +18,12 @@ import (
 // Format is the version of the batch file format, written in each file's header.
 const Format = "lodan-sync/1"
 
+// FormatV2 is the batch file format that carries tag alias lines. The writer
+// uses it only when there is at least one alias in the batch; otherwise the
+// file stays in Format so that machines that have not picked up the new line
+// type yet still read it.
+const FormatV2 = "lodan-sync/2"
+
 // ExportOptions configures Export.
 type ExportOptions struct {
 	Dir       string // root of the repository working copy
@@ -64,6 +70,7 @@ const (
 	typeMemory   = "memory"
 	typeRelation = "relation"
 	typeDeletion = "deletion"
+	typeAlias    = "alias"
 )
 
 type headerLine struct {
@@ -102,19 +109,32 @@ type memoryLine struct {
 }
 
 type relationLine struct {
-	Type      string    `json:"type"`
-	Source    string    `json:"source"` // sync_id
-	Target    string    `json:"target"` // sync_id
-	Kind      string    `json:"kind"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Type       string    `json:"type"`
+	Source     string    `json:"source"` // sync_id
+	Target     string    `json:"target"` // sync_id
+	Kind       string    `json:"kind"`
+	State      string    `json:"state"`
+	Verdict    string    `json:"verdict,omitempty"`
+	Confidence float64   `json:"confidence,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type deletionLine struct {
 	Type      string    `json:"type"`
 	SyncID    string    `json:"sync_id"`
 	DeletedAt time.Time `json:"deleted_at"`
+}
+
+// aliasLine is one entry of the tag alias dictionary: alias → canonical in a
+// state (confirmed, suggested, rejected). Suggested aliases do not travel with
+// the sync; the writer only emits confirmed and rejected rows.
+type aliasLine struct {
+	Type      string    `json:"type"`
+	Alias     string    `json:"alias"`
+	Canonical string    `json:"canonical"`
+	State     string    `json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // batch is the decoded content of one file.
@@ -124,6 +144,7 @@ type batch struct {
 	memories  []memoryLine
 	relations []relationLine
 	deletions []deletionLine
+	aliases   []aliasLine
 }
 
 // decodeBatch parses the JSON Lines of a decrypted file.
@@ -163,6 +184,11 @@ func decodeBatch(lines [][]byte) (batch, error) {
 			if err = json.Unmarshal(raw, &l); err == nil {
 				b.deletions = append(b.deletions, l)
 			}
+		case typeAlias:
+			var l aliasLine
+			if err = json.Unmarshal(raw, &l); err == nil {
+				b.aliases = append(b.aliases, l)
+			}
 		default:
 			return b, fmt.Errorf("línea %d: tipo desconocido %q", i+1, probe.Type)
 		}
@@ -170,8 +196,10 @@ func decodeBatch(lines [][]byte) (batch, error) {
 			return b, fmt.Errorf("línea %d: %w", i+1, err)
 		}
 	}
-	if b.header.Format != Format {
-		return b, fmt.Errorf("formato %q no soportado (se esperaba %s)", b.header.Format, Format)
+	switch b.header.Format {
+	case Format, FormatV2:
+	default:
+		return b, fmt.Errorf("formato %q no soportado (se esperaba %s o %s)", b.header.Format, Format, FormatV2)
 	}
 	return b, nil
 }
