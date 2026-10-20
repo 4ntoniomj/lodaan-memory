@@ -283,7 +283,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. Camino (c) aplicado en `12b973a`: `TestHandleRecallTagsAllThroughMCP` ahora PASA. `TestRecall/S12/S13_date_from/date_to` sigue RED porque su query no está vacía — la ficha del tema detectado sigue cargando todos los records del tema sin filtrar.
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
-| **T4** | S7 | inline (script Go con whitelist) | done (con gap aceptado) | data dir de prueba: 731/951 records con tag concreta (76.9%, target orientativo ≥80%), 220 huérfanos (23.1%, target <20%), 70 aliases confirmados. data dir activo (post B.3): 735/967 (76.0%) con concreta, 232 (24.0%) huérfanos, 286 etiquetas, 70 aliases. Script en `scripts/migrate-taxonomy/`. Gap aceptado por Antonio (2026-10-20): los huérfanos llevan tags generales genuinas; forzar 80% cambiaría la semántica. Documentado en `quality-bar.md §2.1`. |
+| **T5** | S8 | inline (lodan sync) | done | rama `feat/sin-ollama` creada en `4ntoniomj/lodan.sync` desde `main`, con el push de los datos migrados (commit `64da219 sync: portatil 20261020T113904Z-48.jsonl.age`, 92 registros). Convención: `feat/sin-ollama` es la rama principal de esta versión del programa; `main` del sync-repo no se toca (esta versión no vivirá ahí). |
 | **T5** | S10 | inline | pending | awaits T4 |
 | **T6** | S11 | inline (smoke test usuario) | pending | awaits T5 merge |
 
@@ -453,3 +453,8 @@ Antonio autoriza B.3. Procedimiento:
 - Contradicciones: 0.
 
 Pendiente: Fase C (sync repo `4ntoniomj/lodan.sync:feat/sin-ollama`) y Fase F (objetivos O1-O15).
+
+### L17 (2026-10-20, evidence, Fase C aplicada)
+Rama `feat/sin-ollama` creada en `4ntoniomj/lodan.sync` desde `main`. `lodan sync push` ejecutó: "Enviado changes/portatil/20261020T113904Z-48.jsonl.age: 92 registros, 0 relaciones, 1 sesiones, 0 borrados."
+
+Antonio decide no tocar `main` del sync-repo: esta versión del programa no vivirá ahí. `feat/sin-ollama` será la rama equivalente a main para esta versión.
