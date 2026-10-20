@@ -415,3 +415,22 @@ Antonio eligió camino (c): sin ficha del tema cuando query vacía + filtros. Co
 | (c-2) | Suprimir la ficha cuando hay filtros presentes, independientemente de la query | ~10 líneas | Si hay filtros, la ficha no aparece. Output: solo Resultados por filtro. Más coherente con "filtros son la verdad". |
 
 **Mi recomendación revisada:** (c-2). Si los filtros están presentes, son la verdad del usuario. La ficha del tema detectado es contexto adicional, no deseado cuando el usuario ya delimitó con filtros. Es el cambio mínimo y resuelve ambos tests.
+
+### L15 (2026-10-20, evidence, camino (c-2) aplicado, T2 verde)
+Antonio eligió camino (c-2): suprimir la ficha del tema cuando hay filtros, independientemente de la query. Commit `eb2c506`: en `recall.go`, `skipTopic := hasFilters` cubre los tres puntos donde la ficha se carga (ficha pedida, detección por similitud, votación).
+
+**Resultado T2:** verde. Suite completa pasa:
+- `internal/recall` (104s)
+- `internal/mcptools` (279s)
+- `internal/topic` (37s)
+- `internal/memory` (100s)
+- `internal/config` (1s)
+- `cmd/lodan` (38s)
+
+Commits de T2:
+- `2446c10` A.1 tags_index + Normalize preserva `/` + read.go queries[0] + descripciones ≤200 + CLAUDE.md 7 herramientas + e2e/batch_e2e tests actualizados.
+- `12b973a` camino (c) — query vacía + filtros sin ficha.
+- `eb2c506` camino (c-2) — hasFilters sin ficha (la cubre el caso con query).
+- `b5ea819`, `6ba88ca` docs(odd).
+
+Pendiente para cerrar el feature: ejecutar la Fase A.4 del runbook (verificación completa), luego Fase B (migración de datos), Fase C (sync repo) y Fase F (objetivos O1-O15).
