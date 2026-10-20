@@ -280,7 +280,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T0.4** | D4 (quality bar) | inline (diseño) | done | docs/specs/quality-bar.md; 30 días post-merge |
 | **T0.5** | D5 (validation tooling) | inline (diseño) | done | docs/specs/validation-tooling.md; core confirmado, scripts auxiliares fuera |
 | **T1** | S1, S2, S3, S8 | inline (backup + setup) | done | backup `lodan_backup_2026-10-20_094726.full.tar.zst` (9.22 MB, SHA256 `B64E1994…`); data dir de prueba `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data` inicializado y restaurado (puerto 54331, 951 registros vigentes, Ollama no disponible); binario activo `C:\Users\4ntoniomj\bin\lodan.exe` funcional |
-| **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. **2 tests RED por gap conocido**: `TestHandleRecallTagsAllThroughMCP` y `TestRecall/S12/S13_date_from/date_to` — la ficha del tema detectado (topicCard) muestra TODOS los records del tema, sin aplicar los filtros de S12. |
+| **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. Camino (c) aplicado en `12b973a`: `TestHandleRecallTagsAllThroughMCP` ahora PASA. `TestRecall/S12/S13_date_from/date_to` sigue RED porque su query no está vacía — la ficha del tema detectado sigue cargando todos los records del tema sin filtrar.
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
 | **T4** | S7 | delegated worker (migración batched) | pending | awaits T3 |
@@ -398,3 +398,20 @@ Una vez verificados, arranca Fase A del runbook (TDD: A.1 `tags_index`, A.2 filt
   - (c) **Suprimir la ficha cuando hay query vacía + filtros**: si no hay texto, no hay tema que detectar por votación, no hay ficha. Es la salida más coherente con "query vacía + filtros = solo resultados por filtro".
 
 Sin decisión, el feature no está cerrado.
+
+### L14 (2026-10-20, evidence, camino (c) aplicado, segundo gap)
+Antonio eligió camino (c): sin ficha del tema cuando query vacía + filtros. Commit `12b973a` (recall.go): `skipTopicDetect = query == "" && hasFilters` evita tanto la detección por similitud como por votación cuando no hay texto. `textOnly = true` se activa.
+
+**Resultado:**
+- `TestHandleRecallTagsAllThroughMCP` ahora PASA ✓.
+- `TestRecall/S12/S13_date_from/date_to` SIGUE RED. El test usa `Query="actividad"` (no vacía), por lo que el camino (c) no aplica. La ficha del tema detectado sigue cargando los 3 records del tema sin filtrar por fecha.
+
+**Tres opciones para el segundo gap:**
+
+| # | Camino | Costo | Efecto |
+|---|---|---|---|
+| (a) | Filtrar `topicCard` con los filtros S12 siempre que estén presentes | ~30-50 líneas | Cambia comportamiento general del binario: con query con texto + filtros, la ficha del tema respeta los filtros. |
+| (b) | Marcar `TestRecall/S12/S13_date_from/date_to` como fuera de scope | 0 líneas (ajuste del test) | La ficha del tema sigue completa cuando hay texto; los filtros solo refinan `Resultados`. |
+| (c-2) | Suprimir la ficha cuando hay filtros presentes, independientemente de la query | ~10 líneas | Si hay filtros, la ficha no aparece. Output: solo Resultados por filtro. Más coherente con "filtros son la verdad". |
+
+**Mi recomendación revisada:** (c-2). Si los filtros están presentes, son la verdad del usuario. La ficha del tema detectado es contexto adicional, no deseado cuando el usuario ya delimitó con filtros. Es el cambio mínimo y resuelve ambos tests.
