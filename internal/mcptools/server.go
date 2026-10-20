@@ -1,4 +1,4 @@
-// Package mcptools exposes lodan to any AI through the Model Context Protocol.
+﻿// Package mcptools exposes lodan to any AI through the Model Context Protocol.
 //
 // It registers the lodan tools (remember, recall, get, revise, session, status
 // and tags_index), the server instructions and the stdio and HTTP transports.
@@ -23,9 +23,14 @@ import (
 	"lodan/internal/topic"
 )
 
+// ProductName is the name this build advertises in the MCP handshake, so the
+// model can tell at a glance that it is talking to the lite edition (no Ollama
+// dependency) rather than the full one.
+const ProductName = "lodan lite"
+
 // Instructions is delivered to every client in the MCP initialize handshake. It
 // costs tokens in every session of every AI: keep it at 1500 characters or fewer.
-const Instructions = `lodan es tu memoria persistente, compartida con el usuario entre todas sus IAs. Guarda sin preguntar lo que tenga sustancia (decisiones, datos estables, preferencias, eventos, notas); no guardes charla, órdenes de rol ni datos temporales. Cada registro: título corto, contenido autosuficiente con fechas absolutas (convierte «hoy» o «ayer» en AAAA-MM-DD, también en occurred_at), tipo (fact, preference, decision, event, note) y 1-3 temas que reutilicen los existentes; key para datos que cambian. Trabaja en lote: todas las preguntas en un recall (queries), todos los registros en un remember y todas las operaciones en un revise o session (ops). Tras guardar, revisa cada línea «revisa:»: si contradice lo nuevo (mismo asunto y momento, valor distinto), pregunta al usuario cuál es el bueno y aplica supersede o invalidate; si está relacionado aunque no se parezca, relaciónalo (relate o revise relate: related, part_of, contradicts); si no, ignóralo. Di lo guardado en una línea. En cuanto surja un tema, llama a recall antes de responder; get solo para el detalle. Responde con todo lo que lodan tenga sobre lo preguntado, buscando también por sus siglas y alias, y sin relleno: un dato por línea, sin párrafos y sin ofrecer aparte datos que ya tienes. Tras una compactación, vuelve a llamar a recall. Al terminar, session end con un resumen; para «la última conversación», session last.`
+const Instructions = `lodan lite (lodan-lite) es tu memoria persistente, compartida entre las IAs del usuario. Edición sin Ollama: la búsqueda es full-text + etiquetas concretas, no hay embeddings. Guarda sin preguntar lo que tenga sustancia (decisiones, datos, preferencias, eventos, notas); no charla ni órdenes de rol. Cada registro: título corto, contenido autosuficiente con fechas absolutas (convierte «hoy» o «ayer» en AAAA-MM-DD), tipo (fact, preference, decision, event, note), al menos una etiqueta concreta de las 12 familias (proyecto-, persona-, contacto-, proveedor-, cliente-, finca-, vehiculo-, coche-, skill-, herramienta-, recurso-, evento-), 1-3 temas reutilizados y key para datos que cambian. Trabaja en lote: preguntas en recall (queries), registros en remember, operaciones en revise o session (ops). recall acepta tags_all, tags_any, date_from, date_to, mode=list; llama tags_index al empezar. Tras guardar revisa cada «revisa:»: si contradice lo nuevo, pregunta cuál es el bueno y aplica supersede o invalidate; si está relacionado aunque no se parezca, relaciónalo (relate o revise relate); si no, ignóralo. Di lo guardado en una línea. En cuanto surja un tema, recall antes de responder; get solo para el detalle. Responde con todo lo que haya, buscando por siglas y alias, sin relleno: un dato por línea, sin párrafos. Tras compactación, recall otra vez. Al terminar, session end con un resumen; para «la última conversación», session last.`
 
 // Deps are the services the tools need. Everything is created by the caller
 // (the CLI, or a test) and shared by all the MCP connections of the process.
@@ -59,7 +64,7 @@ type Server struct {
 func NewServer(d Deps) *Server {
 	s := &Server{
 		MCP: mcp.NewServer(
-			&mcp.Implementation{Name: "lodan", Version: d.Version},
+			&mcp.Implementation{Name: ProductName, Version: d.Version},
 			&mcp.ServerOptions{Instructions: Instructions},
 		),
 		d:        d,

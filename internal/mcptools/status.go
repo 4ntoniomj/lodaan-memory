@@ -18,6 +18,12 @@ const (
 	maxStatusErrLen = 160
 )
 
+// OllamaStatusLine reports the embedding service state as its own fragment, so
+// a caller can tell "no Ollama because we run lite" from a real failure.
+func OllamaStatusLine(ctx context.Context, d Deps) string {
+	return ollamaStatus(ctx, d)
+}
+
 // statusInput is the (empty) input of the status tool.
 type statusInput struct{}
 
@@ -28,11 +34,11 @@ func (s *Server) handleStatus(ctx context.Context, _ *mcp.CallToolRequest, _ sta
 // StatusLine returns the one-line health report used by the status tool and by
 // `lodan status`:
 //
-//	BD: ok · registros vigentes: N · pendientes de embedding: M · etiquetas: T · sesiones: S · alias: A ·
+//	lodan lite: BD: ok · registros vigentes: N · pendientes de embedding: M · etiquetas: T · sesiones: S · alias: A ·
 //	sugerencias de alias: G · veredictos pendientes: V · contradicciones abiertas: C · Ollama: ok (modelo, D dims)
 //	  ¿alias?: #a ≈ #b (N registros)   (hasta 10 sugerencias pendientes)
 func StatusLine(ctx context.Context, d Deps) string {
-	line := dbStatus(ctx, d) + " · " + ollamaStatus(ctx, d)
+	line := ProductName + ": " + dbStatus(ctx, d) + " · " + ollamaStatus(ctx, d)
 	if s := aliasSuggestions(ctx, d); s != "" {
 		line += "\n" + s
 	}

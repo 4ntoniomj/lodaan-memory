@@ -10,10 +10,18 @@ import (
 )
 
 // version is the release version. It is "dev" unless set at build time with
-// -ldflags "-X main.version=...".
+// -ldflags "-X main.version=...". The lite build appends its edition so the
+// model can tell at a glance which lodan it is talking to (see productName).
 var version = "dev"
 
-const usageText = `lodan: servidor de memoria para asistentes de IA
+// productName is what the model and the user see. The lite edition says so in
+// every surface: the CLI usage, the MCP handshake and the status line. It must
+// stay under the 1500-character Instructions budget.
+const productName = "lodan lite"
+
+const usageText = productName + `: servidor de memoria para asistentes de IA
+(edición sin Ollama: corre con full-text + etiquetas; flag --with-embeddings
+para activar el camino semántico)
 
 Uso:
   lodan <subcomando> [opciones]

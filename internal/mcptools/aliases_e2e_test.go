@@ -390,7 +390,7 @@ func TestAliasesE2E(t *testing.T) {
 
 	run("S16 status line: etiquetas instead of temas and the new counters at the end", func(t *testing.T, d Deps, cs *mcp.ClientSession) {
 		out := mustOK(t, cs, "status", map[string]any{})
-		want := "BD: ok · registros vigentes: 0 · pendientes de embedding: 0 · etiquetas: 0 · sesiones: 0 · alias: 0 · sugerencias de alias: 0 · veredictos pendientes: 0 · contradicciones abiertas: 0 · Ollama: no aplica"
+		want := ProductName + ": BD: ok · registros vigentes: 0 · pendientes de embedding: 0 · etiquetas: 0 · sesiones: 0 · alias: 0 · sugerencias de alias: 0 · veredictos pendientes: 0 · contradicciones abiertas: 0 · Ollama: no aplica"
 		if out != want {
 			t.Errorf("status = %q\nquería     %q", out, want)
 		}
