@@ -269,13 +269,10 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		profile  []Item
 		events   []Item
 	)
-	// Sin texto pero con filtros: no hay nada que matchear contra embeddings ni
-	// contra la votación de la ficha. Saltar la detección de tema deja la salida
-	// coherente con "filtros solos", sin que la ficha del tema ignore los filtros.
-	skipTopicDetect := query == "" && hasFilters
-	if skipTopicDetect {
-		textOnly = true
-	}
+	// Con filtros: la ficha del tema (pedida o detectada) se omite. Los filtros
+	// ya acotan la búsqueda, y la ficha ignoraría los filtros, mostrando más de
+	// lo que el usuario pidió. Si el usuario quiere la ficha, quita los filtros.
+	skipTopic := hasFilters
 	g, gctx := newGroup(ctx)
 
 	// Recarga de la caché de temas: solo hace falta si hay que detectar el tema.
@@ -289,8 +286,9 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		close(topicsReady)
 	}
 
-	// (c) Ficha del tema pedido.
-	if tp != nil {
+	// (c) Ficha del tema pedido. Se omite si hay filtros (skipTopic): el
+	// usuario ya delimitó con tags_all/tags_any/date_from/date_to.
+	if tp != nil && !skipTopic {
 		id := tp.ID
 		g.Go(func() error {
 			p, e, err := s.topicCard(gctx, id)
@@ -320,9 +318,9 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	})
 
 	// (a) Embedding, detección del tema y candidatos semánticos.
-	if skipTopicDetect {
+	if skipTopic {
 		// La salida vive solo del full-text + los filtros (S12). No hace falta
-		// ni embedding ni vecinos semánticos.
+		// ni embedding ni vecinos semánticos ni detección de tema.
 		textOnly = true
 	} else {
 		g.Go(func() error {
@@ -395,7 +393,7 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 
 	// Sin tema todavía: votación entre los mejores resultados. La ficha se lee ahora,
 	// tras la fusión, así que se quitan de los resultados los registros que ya muestra.
-	if tp == nil && !skipTopicDetect {
+	if tp == nil && !skipTopic {
 		voted, ok, err := s.voteTopic(ctx, ids)
 		if err != nil {
 			return Result{}, err
