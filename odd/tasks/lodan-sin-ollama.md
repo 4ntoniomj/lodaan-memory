@@ -281,7 +281,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T0.5** | D5 (validation tooling) | inline (diseño) | done | docs/specs/validation-tooling.md; core confirmado, scripts auxiliares fuera |
 | **T1** | S1, S2, S3, S8 | inline (backup + setup) | done | backup `lodan_backup_2026-10-20_094726.full.tar.zst` (9.22 MB, SHA256 `B64E1994…`); data dir de prueba `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data` inicializado y restaurado (puerto 54331, 951 registros vigentes, Ollama no disponible); binario activo `C:\Users\4ntoniomj\bin\lodan.exe` funcional |
 | **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. Camino (c) aplicado en `12b973a`: `TestHandleRecallTagsAllThroughMCP` ahora PASA. `TestRecall/S12/S13_date_from/date_to` sigue RED porque su query no está vacía — la ficha del tema detectado sigue cargando todos los records del tema sin filtrar.
-| **T2b** | S14 | inline (skill update) | pending | awaits T3 |
+| **T2b** | S14 | inline (skill update) | done | skill `lodan-memoria` v4.0.0 con tags concretas obligatorias, pre-save check (lodan-quality), auto-relación, `tags_index()` al inicio, alias discipline (lodan-alias), taxonomía 12 familias (lodan-taxonomy). `references/herramientas.md` actualizado con `tags_all`/`tags_any`/`date_from`/`date_to`/`mode`. `EXAMPLE.md` con 3 ejemplos de filtros (Caso 5/6/7). Skills nuevas en `~/.config/opencode/skills/`: `lodan-taxonomy`, `lodan-quality`, `lodan-alias`. ADR-005 en `docs/decisions/0005-lodan-sin-ollama.md` (commit `d418bcd`). |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
 | **T5** | S8 | inline (lodan sync) | done | rama `feat/sin-ollama` creada en `4ntoniomj/lodan.sync` desde `main`, con el push de los datos migrados (commit `64da219 sync: portatil 20261020T113904Z-48.jsonl.age`, 92 registros). Convención: `feat/sin-ollama` es la rama principal de esta versión del programa; `main` del sync-repo no se toca (esta versión no vivirá ahí). |
 | **T5** | S10 | inline | pending | awaits T4 |
@@ -453,6 +453,11 @@ Antonio autoriza B.3. Procedimiento:
 - Contradicciones: 0.
 
 Pendiente: Fase C (sync repo `4ntoniomj/lodan.sync:feat/sin-ollama`) y Fase F (objetivos O1-O15).
+
+### L18 (2026-10-20, evidence, Fase D aplicada — skills + ADR)
+- **Skill `lodan-memoria` v4.0.0**: frontmatter actualizado; SKILL.md con tags concretas obligatorias como regla dura, pre-save check, `tags_index()` al inicio de sesión, auto-relación por rareza, alias discipline. `references/herramientas.md` con `tags_all`/`tags_any`/`date_from`/`date_to`/`mode`/`tags_index`. `EXAMPLE.md` con 3 casos nuevos (filtros AND-OR, tags_any con dos fincas, pre-save con matrícula).
+- **Skills nuevas en `~/.config/opencode/skills/`**: `lodan-taxonomy/SKILL.md` (referencia rápida 12 familias, anti-patrones, híbridas, snapshot), `lodan-quality/SKILL.md` (pre-save check, manejo de revisa:), `lodan-alias/SKILL.md` (cuándo confirmar/sugerir/rechazar aliases, política singular/plural, anti-falsa-fusión).
+- **ADR-005** en `docs/decisions/0005-lodan-sin-ollama.md` (commit `d418bcd`). Estructura Contexto/Decisión/Alternativas/Consecuencias. Documenta el gap del 76.0% aceptado, la reversibilidad, y cómo migrar/revertir.
 
 ### L17 (2026-10-20, evidence, Fase C aplicada)
 Rama `feat/sin-ollama` creada en `4ntoniomj/lodan.sync` desde `main`. `lodan sync push` ejecutó: "Enviado changes/portatil/20261020T113904Z-48.jsonl.age: 92 registros, 0 relaciones, 1 sesiones, 0 borrados."
