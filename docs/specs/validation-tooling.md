@@ -122,37 +122,37 @@ Cobertura obligatoria:
 
 ---
 
-## 5. Scripts nuevos (opcionales)
+## 5. Scripts nuevos (opcionales, fuera de alcance por ahora)
 
-### 5.1 `scripts/sugerir_jerarquia.py`
+**Decisión:** mientras estamos en pruebas y consolidación de la v1 de Phase 0, dejamos los scripts auxiliares para una iteración posterior. Lo que hace falta ahora es solo el core del validador (§2) y su integración con la IA (§3). Las herramientas auxiliares se documentan aquí como referencia futura, pero no se programan en este round.
 
-Dado un item (título + contenido), sugiere:
+### 5.1 `scripts/sugerir_jerarquia.py` (futuro)
 
-- Tags concretas apropiadas por heurística:
-  - "matrícula XXXX" → `vehiculo-xxxx` (sin guiones).
-  - "coche Volvo S60" → `coche-volvo-s60`.
-  - "cliente ACME" → `cliente-acme`.
-  - "proyecto X" → `proyecto-x`.
-- Atributos si aplica:
-  - "matrícula" → `<etí>/matricula`.
-  - "seguro" → `<etí>/seguro`.
+Dado un item (título + contenido), sugiere tags concretas apropiadas por heurística:
+
+- "matrícula XXXX" → `vehiculo-xxxx` (sin guiones).
+- "coche Volvo S60" → `coche-volvo-s60`.
+- "cliente ACME" → `cliente-acme`.
+- "proyecto X" → `proyecto-x`.
+
+Y atributos si aplica: "matrícula" → `<etí>/matricula`, "seguro" → `<etí>/seguro`.
 
 Output: JSON con sugerencias, no bloquea. La IA decide.
 
-### 5.2 `scripts/audit_taxonomia.py`
+### 5.2 `scripts/audit_taxonomia.py` (futuro)
 
 Corre SQL sobre la BD activa y emite un reporte:
 
-- Tags concretas con 1 solo uso (candidatas a alias o merge).
-- Tags generales usadas como si fueran concretas (no matchean regex o no tienen slug).
-- Records sin tag concreta (los huérfanos de D4 §2.3).
-- Aliases en estado `suggested` más de 30 días (candidatos a confirmar o rechazar).
-- Veredictos pendientes (confidence < 0.7 y > 7 días sin decisión).
-- Contradicciones abiertas (records con `contradicts` y ninguno `superseded`).
+- Tags concretas con 1 solo uso.
+- Tags generales usadas como si fueran concretas.
+- Records sin tag concreta (huérfanos).
+- Aliases `suggested` con más de 30 días.
+- Veredictos pendientes (confidence < 0.7 y > 7 días).
+- Contradicciones abiertas.
 
-Output: reporte en JSON + tabla Markdown para revisión.
+Output: JSON + tabla Markdown.
 
-Uso: corre una vez por semana o bajo demanda.
+Uso futuro: una vez por semana o bajo demanda, cuando el sistema esté estable y necesitemos auditar.
 
 ---
 
@@ -172,8 +172,6 @@ Una vez T4 completa, el validador se actualiza para que §2.3 sea **error bloque
 |---|---|
 | El validador es muy estricto y rompe guardados que antes funcionaban | §6: tolerar legacy hasta T4. |
 | El validador es muy laxo y deja pasar tags que el servidor rechaza | El servidor tiene D1 CHECK como red final. El validador es primera línea, no única. |
-| Sugerir tags se mete en el flujo y la IA confía ciegamente | El script sugiere; la IA decide. Documentado en `EXAMPLE.md`. |
-| Audit_taxonomia lee la BD y la ralentiza | El script está pensado para usar offline, no en hot path. Si se cronologa, `EXPLAIN ANALYZE` cada una y se cachea el resultado. |
 
 ---
 
@@ -181,7 +179,7 @@ Una vez T4 completa, el validador se actualiza para que §2.3 sea **error bloque
 
 - [ ] Antonio confirma el check de ≥1 tag concreta como **warning** (no error) hasta T4.
 - [ ] Antonio confirma la denylist: `misc`, `general`, `varios`, `info`, `vago`, `na`, `none`.
-- [ ] Antonio confirma los scripts opcionales §5.1 y §5.2 (¿cuáles/¿prioridad?).
+- [ ] Antonio confirma que §5 (scripts auxiliares) queda fuera del alcance de este feature.
 - [ ] Antonio confirma los tests §4 como cobertura mínima.
 
 Cuando esté aprobado, este spec se mueve a `Status: approved` y los updates a `validar_registro.py` pueden arrancar (parte de T2b).
