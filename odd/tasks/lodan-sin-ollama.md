@@ -283,7 +283,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. Camino (c) aplicado en `12b973a`: `TestHandleRecallTagsAllThroughMCP` ahora PASA. `TestRecall/S12/S13_date_from/date_to` sigue RED porque su query no está vacía — la ficha del tema detectado sigue cargando todos los records del tema sin filtrar.
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
-| **T4** | S7 | inline (script Go con whitelist) | done (con gap aceptado) | data dir de prueba: 731/951 records con tag concreta (76.9%, target orientativo ≥80%), 220 huérfanos (23.1%, target <20%), 70 aliases confirmados. Script en `scripts/migrate-taxonomy/`. Gap aceptado por Antonio (2026-10-20): los huérfanos llevan tags generales genuinas; forzar 80% cambiaría la semántica. Documentado en `quality-bar.md §2.1`. |
+| **T4** | S7 | inline (script Go con whitelist) | done (con gap aceptado) | data dir de prueba: 731/951 records con tag concreta (76.9%, target orientativo ≥80%), 220 huérfanos (23.1%, target <20%), 70 aliases confirmados. data dir activo (post B.3): 735/967 (76.0%) con concreta, 232 (24.0%) huérfanos, 286 etiquetas, 70 aliases. Script en `scripts/migrate-taxonomy/`. Gap aceptado por Antonio (2026-10-20): los huérfanos llevan tags generales genuinas; forzar 80% cambiaría la semántica. Documentado en `quality-bar.md §2.1`. |
 | **T5** | S10 | inline | pending | awaits T4 |
 | **T6** | S11 | inline (smoke test usuario) | pending | awaits T5 merge |
 
@@ -434,3 +434,22 @@ Commits de T2:
 - `b5ea819`, `6ba88ca` docs(odd).
 
 Pendiente para cerrar el feature: ejecutar la Fase A.4 del runbook (verificación completa), luego Fase B (migración de datos), Fase C (sync repo) y Fase F (objetivos O1-O15).
+
+### L16 (2026-10-20, evidence, B.3 aplicado al data dir activo)
+Antonio autoriza B.3. Procedimiento:
+
+1. Backup fresco: `C:\Users\4ntoniomj\backups\lodan-pre-migracion-20261020\lodan_backup_2026-10-20_133521.full.tar.zst`.
+2. `lodan db stop` — PostgreSQL parado.
+3. `lodan db start` (la BD del activo estaba en puerto 54329; el script usa `config.Load()` así que apuntó al activo cuando LODAN_DATA_DIR no estaba set).
+4. Script ejecutado contra el data dir activo.
+
+**Métricas post-migración (data dir activo, 967 records):**
+- Records con tag concreta: 735 (76.0%) — gap aceptado.
+- Records huérfanos: 232 (24.0%) — gap aceptado.
+- Etiquetas: 286 (subió de 227; +59 topics del whitelist).
+- Aliases confirmados: 70 (subió de 9).
+- Aliases sugeridos: 4 (sin cambio).
+- Sesiones: 299.
+- Contradicciones: 0.
+
+Pendiente: Fase C (sync repo `4ntoniomj/lodan.sync:feat/sin-ollama`) y Fase F (objetivos O1-O15).
