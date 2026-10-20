@@ -279,7 +279,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T0.3** | D3 (AI skill) | inline (diseño) | done | docs/specs/ai-skill-sin-ollama.md; pre-save + tags_index + auto-relación |
 | **T0.4** | D4 (quality bar) | inline (diseño) | done | docs/specs/quality-bar.md; 30 días post-merge |
 | **T0.5** | D5 (validation tooling) | inline (diseño) | done | docs/specs/validation-tooling.md; core confirmado, scripts auxiliares fuera |
-| **T1** | S1, S2, S3, S8 | inline (backup + setup) | pending | awaits T0.1-T0.5 |
+| **T1** | S1, S2, S3, S8 | inline (backup + setup) | done | backup `lodan_backup_2026-10-20_094726.full.tar.zst` (9.22 MB, SHA256 `B64E1994…`); data dir de prueba `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data` inicializado y restaurado (puerto 54331, 951 registros vigentes, Ollama no disponible); binario activo `C:\Users\4ntoniomj\bin\lodan.exe` funcional |
 | **T2** | S4, S5, S6, S12, S13 | delegated worker | pending | awaits T1; S12-S13 extienden T2 con filtros de primera clase |
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
@@ -356,3 +356,22 @@ Antonio aprueba D1-D5 en round único. T0.1-T0.5 pasan a `done`. Phase 0 cerrada
 - [ ] Acceso a `loreanse/lodan.sync` verificado.
 
 Una vez verificados, arranca Fase A del runbook (TDD: A.1 `tags_index`, A.2 filtros en `recall`, A.3 modo sin Ollama).
+
+### L12 (2026-10-20, evidence, T1 cerrado con seteo manual por conflicto)
+
+**S1 backup:** OK. `lodan_backup_2026-10-20_094726.full.tar.zst` (9.22 MB) en `C:\Users\4ntoniomj\backups\lodan-pre-sin-ollama-20261020\`. SHA256 `B64E1994F7275B7301A2C315A43533B233AEFDAFE0450CBCA8CAFB425C0DE7AD`.
+
+**S2 data dir de prueba:** OK, con workaround manual. `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data\`, restaurado con `lodan db restore` desde el archivo `lodan_backup_2026-10-20_094726.full.tar.zst` (versión parcheada en `…_p54331\full\` con `postgresql.conf` apuntando a puerto 54331). Estado actual: 951 registros vigentes, 766 pendientes de embedding, 225 etiquetas, 297 sesiones, Ollama no disponible.
+
+**S3 rama:** OK, `feat/sin-ollama` desde `dev`, NO mergeada.
+
+**Problemas encontrados y cómo se resolvieron:**
+
+1. **Conflicto de puerto entre data dir activo (54329) y data dir de prueba (54331).** El `install` por defecto escribe `port = 54329` en `postgresql.conf` del nuevo cluster (mismo que la activa). Solución: cambiar `pg_port` en `config.json` del nuevo data dir a `54331` y `port = 54331` en `postgresql.conf` antes del restore.
+2. **Restore sobrescribe `pg/postgresql.conf` con el del backup activo (que tenía `54329`).** No se puede parchear el `postgresql.conf` del nuevo data dir directamente — el restore lo sobreescribe. Solución: extraer el backup, parchear `pg/postgresql.conf` extraído a `port = 54331`, reempaquetar respetando el orden de entries que espera lodan (`info.txt` primero, sin `./`).
+3. **Restore sobrescribe `config.json` del nuevo data dir.** El config.json del nuevo data dir (creado por el install) tenía `pg_port: 54331` pero el restore lo sobreescribió con el del activo (`pg_port: 54329`). Solución: re-editar `config.json` después del restore para volver a `54331`.
+4. **Runbook dice `loreanse/lodan-memory` y `loreanse/lodan.sync`; el remote real es `4ntoniomj/lodaan-memory.git` y `4ntoniomj/lodan.sync.git`.** El `config.json` restaurado revela el `sync_repo` correcto: `https://github.com/4ntoniomj/lodan.sync.git`. El runbook tiene un typo: `loreanse` debería ser `4ntoniomj`. El `sync_repo` ya estaba en el backup y se preservó al editar el config.json.
+
+**Próximo paso:** T2 (delegated worker). Según feature doc, T2 absorbe S4-S6 + S12-S13 + S15. El runbook Fase A es TDD estricto: tests RED primero, GREEN después, refactor al final.
+
+**Pendiente para sync repo:** verificar que `https://github.com/4ntoniomj/lodan.sync.git` sea accesible desde aquí antes de Fase C del runbook.
