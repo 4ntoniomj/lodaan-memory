@@ -274,11 +274,11 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 
 | ID | Specs | Route | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| **T0.1** | D1 (data storage) | inline (diseño) | pending | not started; bloqueante |
-| **T0.2** | D2 (tag taxonomy) | inline (diseño) | pending | not started; bloqueante |
-| **T0.3** | D3 (AI skill) | inline (diseño) | pending | not started; bloqueante |
-| **T0.4** | D4 (quality bar) | inline (diseño) | pending | not started; bloqueante |
-| **T0.5** | D5 (validation tooling) | inline (diseño) | pending | not started; bloqueante |
+| **T0.1** | D1 (data storage) | inline (diseño) | in_review | docs/specs/data-storage-sin-ollama.md (commit `64c2bf4`); awaits Antonio |
+| **T0.2** | D2 (tag taxonomy) | inline (diseño) | in_review | docs/specs/tag-taxonomy.md (commit `64c2bf4`); awaits Antonio |
+| **T0.3** | D3 (AI skill) | inline (diseño) | in_review | docs/specs/ai-skill-sin-ollama.md (commit `64c2bf4`); awaits Antonio |
+| **T0.4** | D4 (quality bar) | inline (diseño) | in_review | docs/specs/quality-bar.md (commit `64c2bf4`); awaits Antonio |
+| **T0.5** | D5 (validation tooling) | inline (diseño) | in_review | docs/specs/validation-tooling.md (commit `64c2bf4`); awaits Antonio |
 | **T1** | S1, S2, S3, S8 | inline (backup + setup) | pending | awaits T0.1-T0.5 |
 | **T2** | S4, S5, S6, S12, S13 | delegated worker | pending | awaits T1; S12-S13 extienden T2 con filtros de primera clase |
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
@@ -322,3 +322,13 @@ Este documento. Estructura: Phase 0 (D1-D5 diseño) → Phase 1 (S1-S11 implemen
 > "Lo de los filtros que te he dicho e posible? ... solo quiero hacer la feuture sin olla,a cudado con eso, vamos por la B entonces, como sería la búsqueda?"
 
 Antonio confirma que `recall` debe extenderse con filtros de primera clase para soportar queries tipo "del trabajo del proyecto en esta fecha". Análisis previo: `recallInput` actual (`internal/mcptools/read.go` línea 14-21) acepta `Query`, `Queries`, `Topics`, `Limit`, `IncludeHistory`. **Falta:** multi-tag AND/OR, date range, combinación de filtros. Tres caminos evaluados: (A) IA orquesta con N llamadas (funciona pero paga tokens), (B) extender el server con `tags_all`/`tags_any`/`date_from`/`date_to` (~150 líneas), (C) query language explícito (sobreingeniería). **Decisión:** B. Specs añadidos: **S12** (extensión del `recallInput` con los 4 parámetros), **S13** (8 tests RED que cubren AND/OR/fecha/combinaciones/edge cases), **S14** (skill update + documentación de herramientas). Tasks afectadas: T2 absorbe S12-S13 (mismo delegated worker que el refactor sin-ollama); T2b nuevo para S14 (inline skill update).
+
+### L9 (2026-10-20, evidence, Phase 0 entregado)
+D1-D5 specs escritos y commiteados en commit `64c2bf4` (1045 líneas en `docs/specs/`). T0.1-T0.5 movidos de `pending` a `in_review`. Pendiente aprobación de Antonio para que Phase 1 (código) arranque.
+
+Cada doc incluye al final una sección de Aprobación con items verificables. Cambios materiales del round:
+- **D1**: pgvector se queda instalado; índice HNSW y cola de pendientes FillPending se eliminan; CHECK de regex en `topics.slug` y `tag_aliases.{alias,canonical}`.
+- **D2**: 12 familias (no 13 — `apuntes-` no califica como concreta porque no identifica entidad); 12 pares de aliases singular/plural; regla snapshot = topic + fecha en contenido.
+- **D3**: pre-save obligatorio (recall antes de remember), revisión rigurosa de `revisa:`, auto-relación por `tag_link_strength >= 0.85`, `tags_index()` al inicio de sesión.
+- **D4**: target 30 días consecutivos post-merge; métricas §3 (search success rate, connected usage) requieren log parsing.
+- **D5**: tag concreta obligatoria es warning hasta T4 (modo compatibilidad); denylist: `misc, general, varios, info, vago, na, none`.
