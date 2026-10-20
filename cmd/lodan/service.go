@@ -35,6 +35,11 @@ func runService(args []string, stdout, stderr io.Writer) int {
 	case "ollama":
 		// Internal: the process of the lodan-ollama Windows service.
 		return runServiceOllama(rest, stderr)
+	case "http":
+		// Internal: the process of the lodan-http Windows service. It answers the
+		// SCM and runs `lodan serve --http` as its child, because the MCP server
+		// over HTTP does not speak the service protocol.
+		return runServiceHTTP(rest, stdout, stderr)
 	case "install":
 		return runServiceInstall(rest, stdout, stderr)
 	case "uninstall":

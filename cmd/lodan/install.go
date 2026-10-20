@@ -119,7 +119,7 @@ func teeLog(path string, stdout, stderr io.Writer) (io.Writer, io.Writer, func()
 
 // runServiceInstall implements the internal `lodan service install`, run elevated by `lodan install`.
 func runServiceInstall(args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("service install", "lodan service install --data-dir <dir> [--user <u>] [--home <dir>] [--ollama-exe <ruta> --ollama-dir <dir>] [--log <archivo>]", stderr)
+	flags := newFlagSet("service install", "lodan service install --data-dir <dir> [--user <u>] [--home <dir>] [--ollama-exe <ruta> --ollama-dir <dir>] [--http-addr <host:puerto>] [--log <archivo>]", stderr)
 	var p install.ServiceParams
 	logFile := flags.String("log", "", "archivo donde se escribe también la salida y el error")
 	flags.StringVar(&p.User, "user", "", "cuenta con la que se ejecutan los servicios")
@@ -127,6 +127,7 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&p.DataDir, "data-dir", "", "directorio de datos de lodan")
 	flags.StringVar(&p.OllamaExe, "ollama-exe", "", "ejecutable de Ollama instalado por lodan")
 	flags.StringVar(&p.OllamaDir, "ollama-dir", "", "directorio de Ollama instalado por lodan")
+	flags.StringVar(&p.HTTPAddr, "http-addr", "", "dirección TCP donde un segundo servicio expone el MCP por HTTP (vacío = no registrarlo)")
 	if code, done := parseFlags(flags, args); done {
 		return code
 	}

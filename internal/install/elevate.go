@@ -36,6 +36,10 @@ type ServiceParams struct {
 	// when no Ollama service has to be registered.
 	OllamaExe string
 	OllamaDir string
+	// HTTPAddr, if set, is the TCP address (host:port) where a second service
+	// exposes the MCP over HTTP, for clients that cannot speak stdio. Empty
+	// means "do not register the HTTP service".
+	HTTPAddr string
 	// LogFile, if set, is where the elevated process also writes its output and errors
 	// (`--log`). Windows only: its console window closes when it ends.
 	LogFile string
@@ -44,6 +48,11 @@ type ServiceParams struct {
 // OllamaLogName is the file in the logs directory that receives the output of the Ollama
 // that `lodan service ollama` wraps on Windows.
 const OllamaLogName = "ollama.log"
+
+// HTTPServiceName is the name of the second service: it exposes the MCP over HTTP
+// for clients that cannot speak stdio (a tunnel, a phone, another machine). It is
+// registered only when ServiceParams.HTTPAddr is set.
+const HTTPServiceName = "lodan-http"
 
 // ServiceSpecs builds the specs of the services to register, in the order in
 // which they should be installed and started: lodan-ollama first (when there is
@@ -93,6 +102,25 @@ func ServiceSpecs(p ServiceParams, goos string) []service.Spec {
 		Env:         env,
 		LogDir:      logDir,
 	})
+
+	// The MCP server over HTTP is a separate service on purpose: the supervisor
+	// above only keeps PostgreSQL alive, and a client that cannot speak stdio (a
+	// tunnel, a phone, another machine) needs something listening on a TCP port.
+	// Keeping them apart means adding or removing the HTTP listener never touches
+	// the supervisor's backup/restore handoff.
+	if p.HTTPAddr != "" {
+		specs = append(specs, service.Spec{
+			Name:        HTTPServiceName,
+			DisplayName: "lodan HTTP",
+			Description: "lodan: servidor MCP por HTTP en " + p.HTTPAddr + " (para tunnels y clientes remotos)",
+			Exec:        StableBinary(p.DataDir, goos),
+			Args: []string{"service", "http", "--addr", p.HTTPAddr,
+				"--log", filepath.Join(logDir, "http.log")},
+			User:   p.User,
+			Env:    map[string]string{"LODAN_DATA_DIR": p.DataDir},
+			LogDir: logDir,
+		})
+	}
 	return specs
 }
 
