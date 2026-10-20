@@ -13,11 +13,15 @@ import (
 
 // recallInput is the input of the recall tool.
 type recallInput struct {
-	Query          string   `json:"query,omitempty" jsonschema:"Pregunta o tema en lenguaje natural"`
+	Query          string   `json:"query,omitempty" jsonschema:"Pregunta o tema en lenguaje natural (puede ser vacía si hay filtros)"`
 	Queries        []string `json:"queries,omitempty" jsonschema:"Varias preguntas en una sola llamada (máx. 200 en total); cada una se responde en su bloque"`
 	Topics         []string `json:"topics,omitempty" jsonschema:"Temas conocidos a priorizar (opcional; si no, se detectan)"`
 	Limit          int      `json:"limit,omitempty" jsonschema:"Resultados por pregunta (por defecto 8, máx. 20)"`
 	IncludeHistory bool     `json:"include_history,omitempty" jsonschema:"Incluir registros sustituidos e invalidados"`
+	TagsAll        []string `json:"tags_all,omitempty" jsonschema:"AND de etiquetas: el registro debe tener TODAS. Tags inexistentes se ignoran; si todas son inválidas, error."`
+	TagsAny        []string `json:"tags_any,omitempty" jsonschema:"OR de etiquetas: el registro debe tener AL MENOS UNA. Tags inexistentes se ignoran."`
+	DateFrom       string   `json:"date_from,omitempty" jsonschema:"Fecha mínima (inclusive) en RFC3339 o AAAA-MM-DD; default sin límite"`
+	DateTo         string   `json:"date_to,omitempty" jsonschema:"Fecha máxima (inclusive) en RFC3339 o AAAA-MM-DD; default sin límite"`
 }
 
 func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, any, error) {
@@ -32,11 +36,19 @@ func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in 
 		Topics:         in.Topics,
 		Limit:          in.Limit,
 		IncludeHistory: in.IncludeHistory,
+		TagsAll:        in.TagsAll,
+		TagsAny:        in.TagsAny,
+		DateFrom:       in.DateFrom,
+		DateTo:         in.DateTo,
 	}
 	if len(queries) > 1 {
 		return textResult(s.recallBatch(ctx, queries, base)), nil, nil
 	}
-	base.Query = queries[0]
+	if len(queries) == 1 {
+		base.Query = queries[0]
+	}
+	// len(queries) == 0 con filtros: base.Query se queda "" y Recall devuelve
+	// los registros que casen con los filtros, sin pasar por la búsqueda de texto.
 	res, err := s.d.Recall.Recall(ctx, base)
 	if err != nil {
 		return errorResult(err), nil, nil

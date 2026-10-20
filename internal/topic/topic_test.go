@@ -24,7 +24,7 @@ func TestNormalize(t *testing.T) {
 	}{
 		{"Entrenamiento", "entrenamiento"},
 		{"Mi Coche!!", "mi-coche"},
-		{"  Gimnasio/Pierna ", "gimnasio-pierna"},
+		{"  Gimnasio/Pierna ", "gimnasio/pierna"},
 		{"Ñandú Ç", "nandu-c"},
 		{"ÀÉÎÖÜ", "aeiou"},
 		{"àèìòù äëïöü âêîôû", "aeiou-aeiou-aeiou"},

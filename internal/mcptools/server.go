@@ -1,10 +1,11 @@
 // Package mcptools exposes lodan to any AI through the Model Context Protocol.
 //
-// It registers exactly six tools (remember, recall, get, revise, session and
-// status), the server instructions and the stdio and HTTP transports. Domain
-// logic lives in packages memory, recall, session and topic: this package only
-// adapts requests and responses, binds one session tracker to each MCP
-// connection and formats compact Spanish plain text (fewer tokens than JSON).
+// It registers the lodan tools (remember, recall, get, revise, session, status
+// and tags_index), the server instructions and the stdio and HTTP transports.
+// Domain logic lives in packages memory, recall, session and topic: this
+// package only adapts requests and responses, binds one session tracker to
+// each MCP connection and formats compact Spanish plain text (fewer tokens
+// than JSON).
 package mcptools
 
 import (
@@ -37,6 +38,10 @@ type Deps struct {
 	Embedder embedding.Embedder
 	Cfg      config.Config
 	Version  string
+	// WithEmbeddings mirrors Cfg.WithEmbeddings so the maintenance loop can
+	// gate FillPending without going through the full Config. False (default):
+	// lodan-sin-ollama runs without Ollama; full-text + tags cubren recall.
+	WithEmbeddings bool
 }
 
 // Server is the lodan MCP server: the SDK server with the six tools registered,
@@ -67,12 +72,13 @@ func NewServer(d Deps) *Server {
 // Tool descriptions. Each character is paid in tokens by every session, so they
 // are short (at most 200 characters).
 const (
-	descRemember = "Guarda registros (máx. 200 por llamada) con etiquetas (#coche-1234abc generales y concretas, máx. 8). Deduplica, resuelve etiquetas y alias, crea las relaciones de relate y lista con «revisa:» registros a comprobar. Con `preview: true` corre todas las comprobaciones sin guardar nada; úsalo antes de guardar algo caro."
-	descRecall   = "Recupera lo relevante para una o varias preguntas (queries, máx. 200) en lenguaje natural: ficha del tema, últimos eventos y resultados. Sigue las etiquetas concretas y trae lo conectado por etiquetas en una sola llamada. Llámala en cuanto surja un tema."
-	descGet      = "Devuelve el contenido completo, etiquetas, clave y relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
-	descRevise   = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete (con confirm); relaciones (relate, confirm_relation, reject_relation); etiquetas (alias, reject_alias); veredictos sobre conflictos (verdict, con confianza); o junta registros repetidos en uno nuevo (merge, con vista previa y huella)."
-	descSession  = "Consulta o cierra conversaciones, una o varias en ops (máx. 200): last (filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
-	descStatus   = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones, Ollama, alias confirmados y pendientes, contradicciones abiertas y veredictos pendientes."
+	descRemember  = "Guarda registros (máx. 200 por llamada) con etiquetas y alias; deduplica y propone relaciones y líneas «revisa:». `preview: true` corre todo sin guardar, úsalo antes de algo caro."
+	descRecall    = "Recupera lo relevante para una o varias preguntas (queries, máx. 200): ficha del tema, últimos eventos y resultados. Sigue etiquetas concretas; trae lo conectado por rareza. Llámala al surgir un tema."
+	descGet       = "Devuelve el contenido completo, etiquetas, clave y relaciones de registros concretos por id (máx. 200), por ejemplo tras recall."
+	descRevise    = "Cambia registros, uno o varios en ops (máx. 200): update, supersede, invalidate, delete; relaciones; aliases; veredictos sobre conflictos; o junta duplicados (merge, con huella)."
+	descSession   = "Consulta o cierra conversaciones, una o varias en ops (máx. 200): last (filtrable por tema, cliente o fecha), list y end (cierra la actual con un resumen)."
+	descStatus    = "Estado de la memoria: base de datos, registros, embeddings pendientes, temas, sesiones, Ollama, alias confirmados y pendientes, contradicciones abiertas y veredictos pendientes."
+	descTagsIndex = "Índice de tags concretas (12 familias de D2) con jerarquía y conteos de registros vigentes. Sirve para saber qué tags existen antes de guardar."
 )
 
 // register adds the six tools to srv. The input schemas are inferred from the
@@ -99,6 +105,10 @@ func (s *Server) register(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "session", Description: descSession, InputSchema: sess}, s.handleSession)
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "status", Description: descStatus, InputSchema: schemaFor[statusInput](), Annotations: readOnly()}, s.handleStatus)
+
+	tagsIdx := schemaFor[tagsIndexInput]()
+	setEnum(tagsIdx, "scope", "trabajo", "personal")
+	mcp.AddTool(srv, &mcp.Tool{Name: "tags_index", Description: descTagsIndex, InputSchema: tagsIdx, Annotations: readOnly()}, s.handleTagsIndex)
 }
 
 // readOnly marks a tool that only reads, so clients may run several calls of

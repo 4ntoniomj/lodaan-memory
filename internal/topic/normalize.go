@@ -25,9 +25,14 @@ var diacritics = map[rune]rune{
 }
 
 // Normalize turns a free-form topic name into a kebab-case slug: lowercase,
-// without diacritics, with every run of characters outside a-z and 0-9
-// replaced by a single "-", trimmed, and at most 60 characters long (cut at a
-// "-" when possible). It returns "" if nothing usable remains.
+// without diacritics, with every run of characters outside a-z, 0-9 and the
+// hierarchy separator "/" replaced by a single "-", trimmed, and at most 60
+// characters long (cut at a "-" when possible). It returns "" if nothing
+// usable remains.
+//
+// "/" is preserved (it marks the hierarchy boundary defined in D2 §5 of
+// odd/tasks/lodan-sin-ollama.md): "coche-volvo-s60/matricula" stays as is, not
+// "coche-volvo-s60-matricula".
 func Normalize(raw string) string {
 	var b strings.Builder
 	lastDash := true // evita un "-" inicial
@@ -41,6 +46,11 @@ func Normalize(raw string) string {
 			lastDash = false
 			continue
 		}
+		if r == '/' {
+			b.WriteRune(r)
+			lastDash = true // un "-" seguido de "/" se colapsa en un solo "/"
+			continue
+		}
 		if !lastDash {
 			b.WriteByte('-')
 			lastDash = true
@@ -50,10 +60,10 @@ func Normalize(raw string) string {
 
 	if len(s) > maxSlugLen {
 		cut := maxSlugLen
-		// Si el carácter siguiente no es "-", la palabra queda partida: se
-		// retrocede hasta el último "-" (si lo hay) para no dejarla a medias.
-		if s[maxSlugLen] != '-' {
-			if i := strings.LastIndexByte(s[:maxSlugLen], '-'); i > 0 {
+		// Si el carácter siguiente no es "-" ni "/", la palabra queda partida:
+		// se retrocede hasta el último separador (si lo hay) para no dejarla a medias.
+		if s[maxSlugLen] != '-' && s[maxSlugLen] != '/' {
+			if i := strings.LastIndexAny(s[:maxSlugLen], "-/"); i > 0 {
 				cut = i
 			}
 		}

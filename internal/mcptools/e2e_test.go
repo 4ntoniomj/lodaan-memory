@@ -151,8 +151,8 @@ func TestE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTools: %v", err)
 		}
-		if len(res.Tools) != 6 {
-			t.Fatalf("tools/list devolvió %d herramientas, quería 6", len(res.Tools))
+		if len(res.Tools) != 7 {
+			t.Fatalf("tools/list devolvió %d herramientas, quería 7", len(res.Tools))
 		}
 		names := map[string]bool{}
 		for _, tool := range res.Tools {

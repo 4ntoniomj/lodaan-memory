@@ -185,7 +185,7 @@ func TestBatches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTools: %v", err)
 		}
-		readOnly := map[string]bool{"recall": true, "get": true, "status": true}
+		readOnly := map[string]bool{"recall": true, "get": true, "status": true, "tags_index": true}
 		raw := map[string]string{}
 		for _, tool := range res.Tools {
 			got := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
