@@ -115,7 +115,8 @@ func (o Options) withDefaults() Options {
 
 // Request is a recall query.
 type Request struct {
-	// Query is the free-text question; 1 to 1000 runes once trimmed.
+	// Query is the free-text question; 1 to 1000 runes once trimmed. May be
+	// empty when TagsAll, TagsAny, DateFrom or DateTo are set.
 	Query string
 	// Topics are the topics the caller wants; the first one that exists is used.
 	Topics []string
@@ -123,6 +124,19 @@ type Request struct {
 	Limit int
 	// IncludeHistory also returns superseded and invalidated records.
 	IncludeHistory bool
+	// TagsAll (AND) are the topic names the record must carry ALL of. Names
+	// that do not exist in the topics table are silently ignored. If the list
+	// becomes empty after filtering, Recall fails.
+	TagsAll []string
+	// TagsAny (OR) are the topic names the record must carry at least ONE of.
+	// Names that do not exist in the topics table are silently ignored.
+	TagsAny []string
+	// DateFrom is the inclusive lower bound on occurred_at. RFC3339 or
+	// AAAA-MM-DD (the latter interpreted as local midnight).
+	DateFrom string
+	// DateTo is the inclusive upper bound on occurred_at. RFC3339 or
+	// AAAA-MM-DD (the latter interpreted as the end of that local day).
+	DateTo string
 }
 
 // Item is one record in a recall answer.
@@ -219,13 +233,23 @@ func (s *Service) clampLimit(limit int) int {
 // sheet is read after the fusion.
 func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	query := strings.TrimSpace(req.Query)
-	if query == "" {
+	hasFilters := len(req.TagsAll) > 0 || len(req.TagsAny) > 0 || strings.TrimSpace(req.DateFrom) != "" || strings.TrimSpace(req.DateTo) != ""
+	if query == "" && !hasFilters {
 		return Result{}, errors.New("la consulta no puede estar vacía")
 	}
 	if n := utf8.RuneCountInString(query); n > maxQueryRunes {
 		return Result{}, fmt.Errorf("la consulta tiene %d caracteres y el máximo es %d", n, maxQueryRunes)
 	}
 	limit := s.clampLimit(req.Limit)
+
+	dateFrom, dateTo, err := parseRangeBoundaries(req.DateFrom, req.DateTo)
+	if err != nil {
+		return Result{}, err
+	}
+	tagsAllIDs, tagsAnyIDs, err := s.resolveFilters(ctx, req.TagsAll, req.TagsAny)
+	if err != nil {
+		return Result{}, err
+	}
 
 	tp, err := s.requestedTopic(ctx, req.Topics)
 	if err != nil {
@@ -245,6 +269,13 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		profile  []Item
 		events   []Item
 	)
+	// Sin texto pero con filtros: no hay nada que matchear contra embeddings ni
+	// contra la votación de la ficha. Saltar la detección de tema deja la salida
+	// coherente con "filtros solos", sin que la ficha del tema ignore los filtros.
+	skipTopicDetect := query == "" && hasFilters
+	if skipTopicDetect {
+		textOnly = true
+	}
 	g, gctx := newGroup(ctx)
 
 	// Recarga de la caché de temas: solo hace falta si hay que detectar el tema.
@@ -273,7 +304,14 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 
 	// (b) Candidatos de texto.
 	g.Go(func() error {
-		ids, err := s.textSearch(gctx, query, req.IncludeHistory)
+		ids, err := s.textSearch(gctx, TextFilter{
+			Query:          query,
+			IncludeHistory: req.IncludeHistory,
+			TagsAll:        tagsAllIDs,
+			TagsAny:        tagsAnyIDs,
+			DateFrom:       dateFrom,
+			DateTo:         dateTo,
+		})
 		if err != nil {
 			return err
 		}
@@ -282,46 +320,52 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	})
 
 	// (a) Embedding, detección del tema y candidatos semánticos.
-	g.Go(func() error {
-		v, err := s.embedQuery(gctx, query)
-		switch {
-		case err == nil:
-			vec = v
-		case errors.Is(err, embedding.ErrUnavailable):
-			textOnly = true
-			return nil
-		default:
-			return err
-		}
-
-		if tp == nil && s.topics != nil {
-			<-topicsReady
-			if err := gctx.Err(); err != nil {
+	if skipTopicDetect {
+		// La salida vive solo del full-text + los filtros (S12). No hace falta
+		// ni embedding ni vecinos semánticos.
+		textOnly = true
+	} else {
+		g.Go(func() error {
+			v, err := s.embedQuery(gctx, query)
+			switch {
+			case err == nil:
+				vec = v
+			case errors.Is(err, embedding.ErrUnavailable):
+				textOnly = true
+				return nil
+			default:
 				return err
 			}
-			// The ok of Detect applies the equivalence threshold of the resolver, so
-			// only the returned cosine is used. A zero ID means the cache holds no
-			// topic with an embedding.
-			if t, sim, _ := s.topics.Detect(gctx, vec); t.ID != 0 && sim >= s.opts.TopicDetectThreshold {
-				tp, via = &t, TopicViaSimilarity
-				g.Go(func() error {
-					p, e, err := s.topicCard(gctx, t.ID)
-					if err != nil {
-						return err
-					}
-					profile, events = p, e
-					return nil
-				})
-			}
-		}
 
-		near, err := memory.Nearest(gctx, s.pool, vec, s.emb.Dims(), s.opts.Candidates, semanticCandidates, -1, nil)
-		if err != nil {
-			return fmt.Errorf("falló la búsqueda semántica: %w", err)
-		}
-		semantic = near
-		return nil
-	})
+			if tp == nil && s.topics != nil {
+				<-topicsReady
+				if err := gctx.Err(); err != nil {
+					return err
+				}
+				// The ok of Detect applies the equivalence threshold of the resolver, so
+				// only the returned cosine is used. A zero ID means the cache holds no
+				// topic with an embedding.
+				if t, sim, _ := s.topics.Detect(gctx, vec); t.ID != 0 && sim >= s.opts.TopicDetectThreshold {
+					tp, via = &t, TopicViaSimilarity
+					g.Go(func() error {
+						p, e, err := s.topicCard(gctx, t.ID)
+						if err != nil {
+							return err
+						}
+						profile, events = p, e
+						return nil
+					})
+				}
+			}
+
+			near, err := memory.Nearest(gctx, s.pool, vec, s.emb.Dims(), s.opts.Candidates, semanticCandidates, -1, nil)
+			if err != nil {
+				return fmt.Errorf("falló la búsqueda semántica: %w", err)
+			}
+			semantic = near
+			return nil
+		})
+	}
 
 	if err := g.Wait(); err != nil {
 		return Result{}, err
@@ -351,7 +395,7 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 
 	// Sin tema todavía: votación entre los mejores resultados. La ficha se lee ahora,
 	// tras la fusión, así que se quitan de los resultados los registros que ya muestra.
-	if tp == nil {
+	if tp == nil && !skipTopicDetect {
 		voted, ok, err := s.voteTopic(ctx, ids)
 		if err != nil {
 			return Result{}, err
@@ -492,10 +536,19 @@ func (s *Service) embedQuery(ctx context.Context, query string) ([]float32, erro
 	return v, nil
 }
 
-// textSearch returns the ids of the records matching the query in full text,
-// best first. Non-active records are included only with history.
-func (s *Service) textSearch(ctx context.Context, query string, history bool) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, TextCandidatesSQL(history), query, textCandidates)
+// textSearch returns the ids of the records matching the filter, best first.
+// Non-active records are included only when IncludeHistory is set.
+func (s *Service) textSearch(ctx context.Context, f TextFilter) ([]int64, error) {
+	tagsAll := f.TagsAll
+	if tagsAll == nil {
+		tagsAll = []int32{}
+	}
+	tagsAny := f.TagsAny
+	if tagsAny == nil {
+		tagsAny = []int32{}
+	}
+	rows, err := s.pool.Query(ctx, TextCandidatesSQL(f),
+		f.Query, f.IncludeHistory, tagsAll, tagsAny, f.DateFrom, f.DateTo, textCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("falló la búsqueda por texto: %w", err)
 	}
@@ -510,6 +563,114 @@ func (s *Service) textSearch(ctx context.Context, query string, history bool) ([
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("falló la búsqueda por texto: %w", err)
+	}
+	return ids, nil
+}
+
+// parseRangeBoundaries parses DateFrom and DateTo from a Request. An AAAA-MM-DD
+// date_from is local midnight (start of the day); an AAAA-MM-DD date_to is the
+// end of that local day so the whole day is included. RFC3339 dates are used
+// as-is. Empty strings return nil.
+func parseRangeBoundaries(dateFrom, dateTo string) (*time.Time, *time.Time, error) {
+	from, err := parseRangeBoundary(dateFrom, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("date_from: %w", err)
+	}
+	to, err := parseRangeBoundary(dateTo, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("date_to: %w", err)
+	}
+	return from, to, nil
+}
+
+// parseRangeBoundary parses a date_from or date_to string. isTo=true interprets
+// AAAA-MM-DD as the end of that local day (inclusive).
+func parseRangeBoundary(raw string, isTo bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &t, nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("%q no es válida: usa RFC3339 (2026-09-28T10:30:00+02:00) o AAAA-MM-DD", raw)
+	}
+	if isTo {
+		t = t.Add(24*time.Hour - time.Nanosecond)
+	}
+	return &t, nil
+}
+
+// resolveFilters normalizes each requested tag name, resolves confirmed aliases
+// and returns the topic ids that exist in the topics table. Names that do not
+// exist are silently dropped from the corresponding list. tagsAll that becomes
+// empty after filtering is an error ("tags_all: ninguna tag existe"); tagsAny
+// that becomes empty is allowed (the OR filter is simply skipped).
+func (s *Service) resolveFilters(ctx context.Context, tagsAll, tagsAny []string) ([]int32, []int32, error) {
+	all, err := s.resolveTagIDs(ctx, tagsAll)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(tagsAll) > 0 && len(all) == 0 {
+		return nil, nil, errors.New("tags_all: ninguna tag existe")
+	}
+	any, err := s.resolveTagIDs(ctx, tagsAny)
+	if err != nil {
+		return nil, nil, err
+	}
+	return all, any, nil
+}
+
+// resolveTagIDs normalizes the names, resolves aliases and returns the topic
+// ids that exist in the topics table (silently dropping the rest).
+func (s *Service) resolveTagIDs(ctx context.Context, names []string) ([]int32, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	var slugs []string
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		slug := topic.Normalize(n)
+		if slug == "" || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		if s.topics != nil {
+			canonical, ok, err := s.topics.Canonical(ctx, slug)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				slug = canonical
+			}
+		}
+		slugs = append(slugs, slug)
+	}
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	compact := make([]string, len(slugs))
+	for i, slug := range slugs {
+		compact[i] = strings.ReplaceAll(slug, "-", "")
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id FROM topics WHERE replace(slug, '-', '') = ANY($1) ORDER BY id`, compact)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudieron buscar las etiquetas: %w", err)
+	}
+	defer rows.Close()
+	var ids []int32
+	for rows.Next() {
+		var id int32
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("no se pudo leer el id de una etiqueta: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("no se pudieron buscar las etiquetas: %w", err)
 	}
 	return ids, nil
 }
