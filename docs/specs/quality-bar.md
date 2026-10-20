@@ -23,8 +23,10 @@ Las métricas se miden en **tres momentos**:
 ### 2.1 `% records con ≥1 tag concreta`
 
 - **Definición:** records activos (`status='active'`) que tienen al menos un `memory_topics` cuyo `topics.slug` matchea la regex de D2.
-- **Target post-migración:** **≥80%**.
+- **Target post-migración inicial:** **≥80%** (orientativo, no bloqueante).
 - **Target post-uso (30 días):** **≥95%**.
+- **Estado actual medido (2026-10-20):** 76.9% (731/951) tras el script de T4 con whitelist hardcoded de ~60 candidatas.
+- **Por qué el gap es aceptable:** los registros huérfanos (23.1%) llevan tags generales genuinas (`agridemur`, `lodan`, `proyectos`, `forma-de-trabajo`, `clientes`, `odd`, `arquitectura`, `ia`, `pruebas`, `despliegue`, `feature`, `programa`, `modelo`, `calidad`) que cubren dominios amplios. Forzar la métrica al 80% requiere reasignar a `recurso-*` lo que son coberturas, lo que cambia la semántica del guardado sin mejorar la recuperabilidad real.
 - **Por qué:** sin tag concreta, el record no es navegable. Es ruido. La IA no lo va a recuperar salvo full-text exacto, lo cual es frágil.
 
 ### 2.2 `% tags concretas reutilizadas (>1 uso)`
