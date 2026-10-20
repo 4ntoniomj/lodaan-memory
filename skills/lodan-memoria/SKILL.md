@@ -15,7 +15,7 @@ description: >-
   guardado. No usar para desarrollar, depurar o instalar el propio lodan (usar sdd) ni
   para guardar charla, órdenes de rol o datos temporales.
 metadata:
-  version: "3.0.0"
+  version: "4.0.0"
 ---
 
 # lodan-memoria
@@ -44,7 +44,7 @@ Verificación: sabes si el mensaje trae algo que recuperar y/o algo que guardar.
 
 ### Paso 2. Recuperar antes de responder, en lote
 
-En cuanto la conversación toca uno o varios temas, llama **una vez** a `recall` antes de contestar. Si hay varias preguntas o temas, van todas en la misma llamada con `queries` (una lista); el servidor las responde a la vez, en un bloque `## <pregunta>` por cada una.
+En cuanto la conversación toca uno o varios temas, llama **una vez** a `tags_index` (si el servidor lo expone) para tener el mapa de tags concretas con jerarquía y conteos. Útil para saber qué nombres existen antes de inventar uno. Después llama **una vez** a `recall` antes de contestar. Si hay varias preguntas o temas, van todas en la misma llamada con `queries` (una lista); el servidor las responde a la vez, en un bloque `## <pregunta>` por cada una.
 
 - **Busca por todos los nombres de lo preguntado.** Una misma cosa puede estar guardada con siglas, abreviaturas o alias (por ejemplo «AGM» y «Agridemur», o el nombre comercial y el fiscal de un cliente). Mete en `queries` cada nombre que conozcas por la conversación o por lodan. Si un resultado dice que X también se llama Y y no lo habías buscado, haz un segundo `recall` con Y antes de responder.
 - Cuando el usuario te diga que dos nombres son lo mismo («AGM es Agridemur»), guárdalo como `fact` con título «Alias: X = Y» en el tema de los dos.
@@ -75,14 +75,14 @@ Verificación: cada ítem devuelve `#id guardado` (o duplicado explicado).
 
 ### Paso 3a. Etiquetas, alias y claves concretas
 
-- **Etiquetas (`tags` o `topics`, se juntan):** máximo 8 por registro, sin `#`, en forma normalizada (`Normalize` la baja y le quita guiones para empatar `coche-4860-ngl` con `coche-4860ngl`). Una mezcla de **generales** (que se repiten mucho: `#agridemur`, `#vdm`) y **concretas** (que identifican un objeto: `#coche-4860ngl`, `#matricula`). Las concretas son las que `recall` sigue y las que arman las relaciones por rareza. Familias para las concretas:
-  - `coche-<matrícula>` (sin guiones en la matrícula: `coche-4860ngl`)
-  - `cliente-<nombre>`
-  - `finca-<nombre>`
-  - `proyecto-<nombre>`
-  - cualquier otra familia que el usuario declare, manteniendo el formato `<familia>-<slug>`
+- **Etiquetas (`tags` o `topics`, se juntan):** máximo 8 por registro, sin `#`, en forma normalizada (`Normalize` la baja y le quita guiones para empatar `coche-4860-ngl` con `coche-4860ngl`). **Regla dura:** todo registro DEBE llevar al menos una etiqueta **concreta** de las 12 familias (ver `lodan-taxonomy`). Sin etiqueta concreta el registro queda huérfano y rompe las métricas de cobertura. Las generales (`#trabajo`, `#personal`, `#lodan`, `#odd`, `#arquitectura`, `#feature`, `#runbook`, `#forma-de-trabajo`) son complemento, no sustituto. Familias para las concretas (12):
+  - `proyecto-<slug>`, `persona-<slug>`, `contacto-<empresa>-<persona>`, `proveedor-<slug>`, `cliente-<slug>`, `finca-<slug>`, `vehiculo-<matrícula>`, `coche-<slug>`, `skill-<slug>`, `herramienta-<slug>`, `recurso-<slug>`, `evento-<slug>`
+  - Forma: `<familia>-<slug>/<atributo>` (jerarquía con `/`), hasta 3 atributos.
+  - Si dudas de la familia, carga `lodan-taxonomy`.
+- **Pre-save obligatorio:** antes de enviar `items[]`, pasa por `lodan-quality` (forma, denylist, jerarquía, secretos, fechas absolutas). Sin esto, el servidor devuelve errores que rompen el guardado.
 - **Clave concreta (`key`):** una sola por registro, de la forma `<etiqueta concreta>/<atributo>` (`coche-4860ngl/matricula`, `coche-4860ngl/itv`, `coche-4860ngl/seguro`). Para datos que cambian con el tiempo: el nuevo sustituye al anterior con la misma clave.
-- **Alias:** dos formas de llegar al mismo tema (`#agm` y `#agridemur`). El servidor tiene un diccionario: el servidor lo aplica solo cuando está **confirmado** (`revise alias`). Si aún es una **sugerencia** (la lanza el propio servidor al detectar un parecido), la IA decide: confirmar con `revise alias`, rechazar con `revise reject_alias`, o preguntar al usuario si duda.
+- **Auto-relación por rareza:** si el registro lleva una etiqueta concreta rara (usada en <3 registros activos, umbral `tag_link_strength >= 0.85` por default), el servidor propondrá relaciones automáticas por tag. La IA acepta las evidentes y deja las dudosas para el usuario.
+- **Alias:** dos formas de llegar al mismo tema (`#agm` y `#agridemur`). El servidor tiene un diccionario: el servidor lo aplica solo cuando está **confirmado** (`revise alias`). Si aún es una **sugerencia** (la lanza el propio servidor al detectar un parecido), la IA decide: confirmar con `revise alias`, rechazar con `revise reject_alias`, o preguntar al usuario si duda. Carga `lodan-alias` para decisiones sistemáticas.
 - **Nada se junta por parecido:** una nueva etiqueta parecida a otra (`coche-4860gnl` vs `coche-4860ngl`) se guarda como está y aparece como `¿alias?: #nueva ≈ #existente` debajo del registro guardado; la IA decide. No se funden nunca solas — eso juntaría dos matrículas distintas (0762MWY y 0763MWY).
 
 ### Paso 4. Revisar lo que devuelve el guardado: contradicciones y relaciones
@@ -128,11 +128,13 @@ Verificación: `session end` devuelve «Sesión cerrada con resumen».
 
 ## Formato de salida
 
-1. **La respuesta al usuario: completa y sin relleno.** El usuario quiere saberlo **todo** lo que lodan tiene sobre lo que pregunta, y nada que no aporte. La longitud la marca la cantidad de datos, nunca un tope de líneas.
-   - Incluye todo lo pertinente que hayas recuperado, también lo que está guardado con otro nombre (siglas, alias) y lo dudoso, marcado como dudoso.
-   - Formato denso: una línea o una fila de tabla por dato; sin párrafos, sin introducciones, sin repetir la pregunta, sin explicar la memoria ni de dónde sale cada dato salvo que haga falta para resolver una duda.
-   - **Nunca te guardes datos encontrados para ofrecerlos después** («¿quieres esa lista?», «dime si quieres más»): si es pertinente, va en la respuesta.
-   - Relleno es lo que no es un dato: cortesías, resúmenes de lo ya dicho, consejos no pedidos.
+**Regla de oro: denso y completo, sin palabras de relleno.** Una línea de respuesta es «una línea» en el sentido de «sin párrafos ni conectores», NO en el sentido de «línea corta». Si el dato tiene 7 puntualizaciones (ruta, columnas, valores, excepciones, condiciones, ejemplos, significados ambiguos), la línea las enumera separadas por `;` o `,`. Comprimir datos cruciales para que la respuesta «quepa en una línea» es perder información, no ser denso.
+
+1. **La respuesta al usuario: completa y sin relleno.** Da **todo** lo que lodan tiene sobre lo preguntado — incluye lo guardado con siglas, alias o nombres alternativos, y marca como duda lo dudoso. La longitud la marca la cantidad de datos, nunca un tope de líneas.
+   - Formato denso: una línea o una fila de tabla por dato; sin párrafos, sin introducciones, sin repetir la pregunta, sin conectores vacíos («Pues bien», «Como dijiste», «Ahora bien», «He guardado…»), sin ofertas posteriores («¿quieres más?», «dime si quieres que…»), sin explicar la memoria ni de dónde sale cada dato salvo que haga falta para resolver una duda.
+   - **Nunca te guardes datos encontrados para ofrecerlos después.** Si es pertinente, va en la respuesta.
+   - **Lo que SÍ es dato y va siempre:** valores concretos (rutas de ficheros, nombres de columnas, números, fechas, nombres, IDs), puntualizaciones técnicas, condiciones, excepciones, significados ambiguos de acciones (tachar, borrar, marcar), ejemplos, quién dijo qué.
+   - **Lo que NO es dato y se omite siempre:** saludos («¡Listo!», «¡Hecho!»), confirmaciones vacías sin contenido, resúmenes del prompt anterior, consejos no pedidos, párrafos de contexto que no aportan dato, ofertas de más ayuda, conexiones de cortesía.
 
    Ejemplo para «¿cuál es la matrícula del coche?»:
 
@@ -141,18 +143,25 @@ Verificación: `session end` devuelve «Sesión cerrada con resumen».
 
    Ejemplo para «¿qué coches tiene Agridemur?»: la tabla completa de los coches de Agridemur **y** los vehículos marcados AGM (AGM = Agridemur) en otras hojas, con sus dudas, en una sola respuesta.
 
-    Ejemplo del `preview` antes de guardar:
+     Ejemplo del `preview` antes de guardar:
 
-    > VISTA PREVIA — no se ha guardado nada
-    > ítem 1 «ITV pasada»
-    >   etiquetas: #coche-4860ngl, #itv
-    >   clave sugerida: coche-4860ngl/itv (sustituiría a #37)
-    >   conectaría: #35 (por #coche-4860ngl), #12 (por #itv)
-    >   revisa: #35 [fact 2026-09-12] «Coche de Ana: matrícula» — la ITV se asocia al mismo coche
-    >   revisa: #12 [fact 2026-08-04] «ITV caducada 2026-08-01» — la ITV anterior, ahora superada
-    >
-    > Si todo encaja, repite `remember` sin `preview: true`.
-2. Una línea por cada guardado o corrección: «Guardado en lodan: …» / «Actualizado en lodan: …» / «Relacionado en lodan: …».
+     > VISTA PREVIA — no se ha guardado nada
+     > ítem 1 «ITV pasada»
+     >   etiquetas: #coche-4860ngl, #itv
+     >   clave sugerida: coche-4860ngl/itv (sustituiría a #37)
+     >   conectaría: #35 (por #coche-4860ngl), #12 (por #itv)
+     >   revisa: #35 [fact 2026-09-12] «Coche de Ana: matrícula» — la ITV se asocia al mismo coche
+     >   revisa: #12 [fact 2026-08-04] «ITV caducada 2026-08-01» — la ITV anterior, ahora superada
+     >
+     > Si todo encaja, repite `remember` sin `preview: true`.
+
+2. **Una línea por cada guardado o corrección, con TODAS las puntualizaciones del registro.** Esa línea refleja el contenido del record, no solo el titular. Si el guardado incluye ruta, columnas, excepciones y significado de una acción, todo aparece en la línea — separado por `;` o `,`, no en frases con punto.
+
+   Ejemplo real (registro #1158 del 2026-10-20, decisión):
+
+   > Guardado en lodan: #1158 [decisión 2026-10-20] Cosecha vs Cargas Marketing — cruzar hoja de cosecha de MK con CARGAS MARKETING (hoja BASE del fichero `G:\Mi unidad\AGRIDEMUR\2. Cosechas\26-27 HOJA DE CARGAS MARKETING.xlsx`; campaña 26-27; copia cosecha_trabajo = 25-26 antigua); BASE con dos columnas FECHA (1ª SALIDA, 2ª CORTE/entrada) y columna CORTE = texto (AGM / VEGA MAYOR / MK / FRUCA), no fecha. Lo que está en cargas pero NO en cosecha = ese día no se corta → sin pedido agricultor y se TACHA en cosecha (siempre tras volver a comprobar cargas). Tachar = negación: en este contexto = NO se va a cargar.
+
+   Variantes: «Guardado en lodan: #id [tipo fecha] …»; «Actualizado en lodan: #id [tipo fecha] …»; «Relacionado en lodan: #a con #b (related|part_of|contradicts)»; «Borrado como no válido: #id».
 3. Si hay una contradicción, la pregunta del paso 1, sola, al final.
 4. Si lodan no está disponible (`status` falla o las herramientas no responden): una línea que lo diga, sin sustituirlo en silencio por otro almacén.
 
@@ -166,7 +175,7 @@ Verificación: `session end` devuelve «Sesión cerrada con resumen».
 - **Etiquetas:** como máximo 8 por registro, mezcla de generales y concretas; las concretas son `coche-<matrícula>`, `cliente-<nombre>`, `finca-<nombre>`, `proyecto-<nombre>` u otra familia que el usuario declare, siempre en el formato `<familia>-<slug>`. Una sola `#` por delante se ignora. El servidor **no** junta nunca dos etiquetas por parecido (juntaría matrículas distintas); las sugerencias de alias las confirma o rechaza la IA (o el usuario).
 - **Clave concreta (`key`):** una sola por registro, de la forma `<etiqueta concreta>/<atributo>`. El servidor sustituye al anterior con la misma clave.
 - **Vista previa antes de guardar:** cuando los tags sean delicados o el contenido se parezca a algo ya guardado, lanza primero `remember` con `preview: true`. Corrige lo que la vista previa te diga (etiqueta sugerida, `¿alias?`, `revisa:`) antes de guardar de verdad.
-- **Juntar duplicados (`merge`):** la primera vez, **solo vista previa** (sin `confirm`); con `confirm: true` y el `fingerprint` igual al de la vista previa, el servidor crea el registro y marca los originales como sustituidos. Nunca `confirm` sin vista previa, y nunca cambies el contenido entre la vista previa y la confirmación (la huella cambia y el servidor rechaza).
+- **Juntar duplicados (`merge`):** la primera vez, **solo vista previa** (sin `confirm`); con `confirm: true` y `fingerprint` igual al de la vista previa, el servidor crea el registro y marca los originales como sustituidos. Nunca `confirm` sin vista previa, y nunca cambies el contenido entre la vista previa y la confirmación (la huella cambia y el servidor rechaza).
 - No escribas SQL ni calcules embeddings; habla en lenguaje natural.
 - Borrar definitivamente exige petición expresa del usuario.
 - Origen y licencias de las ideas adaptadas: [procedencia.md](references/procedencia.md).
