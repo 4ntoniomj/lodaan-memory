@@ -62,11 +62,15 @@ Extensión: `vector` (pgvector) está instalada vía `0001_init.sql`. **Se manti
 
 **No se renombra nada. No se cambia el tipo de nada. No se borran columnas.**
 
-### 3.2 pgvector — mantener extensión, quitar índice activo
+### 3.2 pgvector — extensión e índices HNSW se mantienen en la BD
 
-- **Extensión `vector` se mantiene.** Costo cero si no se inserta ninguna fila con embedding. Permite volver a activar embeddings vía flag sin nueva migración mayor.
-- **Índice `memories_bq_hnsw` se elimina.** No se hace búsqueda semántica por default. Mantenerlo paga espacio y costo de `UPDATE` en vano.
-- **Índice `memories (id) WHERE embedding IS NULL` se elimina.** Es la cola de pendientes para `FillPending`. Si `FillPending` está desactivado por default, la cola es vacía y el índice es ruido.
+**Decisión de reversibilidad.** La rama `feat/sin-ollama` se mantiene como rama experimental; si algo sale mal, Antonio puede volver a `main` o `dev` sin tocar la BD. Por eso **ningún cambio D1 es destructivo**.
+
+- **Extensión `vector` se mantiene.** Sin cambios. Costo cero si no se usa.
+- **Índice `memories_bq_hnsw` se mantiene en la BD.** El server, cuando arranca con `--with-embeddings=false` (default en esta rama), **no consulta** este HNSW. Si la rama vuelve atrás, el índice sigue ahí y usable sin cambios.
+- **Índice `memories (id) WHERE embedding IS NULL` se mantiene en la BD.** Misma lógica: el server no encola si `--with-embeddings=false`. Si rollback, la cola queda vacía (no se llama FillPending) pero el índice sigue válido.
+
+**Implicación:** si en el futuro se decide quitar los índices permanentemente (más allá de la rama), se hace con un nuevo round de diseño y plan de rollback explícito. **No en D1.**
 
 ### 3.3 Constraints
 
@@ -109,8 +113,8 @@ No aplica (no hay `topic_key` como columna separada). Cuando se introduzca, la r
 | `memory_topics (topic_id, kind, ts DESC) WHERE active` | Mantener | Tags-first queries y `mode='list'`. |
 | `memory_topics_profile_idx`, `memory_topics_events_idx` | Mantener | Perfil de tema. |
 | `topics_compact_slug_idx` | Mantener | Búsqueda ignorando guiones. |
-| `memories (id) WHERE embedding IS NULL` | **Eliminar** | Cola de pendientes sin uso. |
-| `memories_bq_hnsw` | **Eliminar** | HNSW sin búsqueda semántica por default. |
+| `memories (id) WHERE embedding IS NULL` | Mantener | Cola de pendientes; el server no la llena si `--with-embeddings=false`. Rollback-safe. |
+| `memories_bq_hnsw` | Mantener | HNSW sobre `embedding`; el server no lo consulta si `--with-embeddings=false`. Rollback-safe. |
 
 No se añaden índices nuevos en esta migración. Si el perfil de consultas cambia (p.ej. `tags_all` necesita un índice más selectivo), se mide y se justifica en una migración aparte.
 
@@ -142,12 +146,6 @@ ALTER TABLE tag_aliases
   ADD CONSTRAINT tag_aliases_canonical_format_chk
   CHECK (canonical ~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*(/[a-z0-9]+)*$');
 
--- 3) Quitar índice HNSW (búsqueda semántica deshabilitada por default).
-DROP INDEX IF EXISTS memories_bq_hnsw;
-
--- 4) Quitar índice de cola de pendientes (FillPending desactivado por default).
-DROP INDEX IF EXISTS memories_embedding_pending_idx;
-
 COMMIT;
 ```
 
@@ -155,14 +153,6 @@ COMMIT;
 
 ```sql
 BEGIN;
-
--- Re-crear índice HNSW asumiendo que la dimensión configurada sigue siendo la misma.
--- Nota: requiere leer `embedding_models.dims` y aplicar el template. La migración down
--- documenta el shape, la implementación concreta la hace el runner (golang-migrate).
-CREATE INDEX memories_bq_hnsw ON memories
-  USING hnsw ((binary_quantize(embedding)::bit(N)) bit_hamming_ops) WHERE status='active';
-
-CREATE INDEX ON memories (id) WHERE embedding IS NULL;
 
 ALTER TABLE tag_aliases
   DROP CONSTRAINT IF EXISTS tag_aliases_alias_format_chk,
@@ -212,8 +202,9 @@ Antes de promover a Phase 1:
 | Riesgo | Mitigación |
 |---|---|
 | CHECK rechaza slugs legacy que ya están en BD | La migración añade la constraint; si falla por datos existentes, se documenta en runbook y se hace cleanup previo (T4). |
-| Quitar `memories_bq_hnsw` rompe alguna búsqueda que dependía de él | El binario nuevo no expone búsqueda semántica por default; se conserva detrás de flag. Si alguien la usa, el flag la reactiva y el índice se recrea on-demand. |
 | Aliases con forma legacy (mayúsculas, espacios) ya confirmados | La migración los rechaza. Plan de remediación: marcar como `rejected` los aliases mal formados, mantener `canonical` válido, y volver a confirmar. Se hace en el script de migración de T4. |
+
+**Nota de reversibilidad:** ningún cambio D1 toca datos existentes ni índices. Si la rama `feat/sin-ollama` se abandona y se vuelve a `main`/`dev`, la BD queda igual. Los CHECKs son aditivos (`ADD CONSTRAINT`), no destructivos.
 
 ---
 
