@@ -280,7 +280,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T0.4** | D4 (quality bar) | inline (diseño) | done | docs/specs/quality-bar.md; 30 días post-merge |
 | **T0.5** | D5 (validation tooling) | inline (diseño) | done | docs/specs/validation-tooling.md; core confirmado, scripts auxiliares fuera |
 | **T1** | S1, S2, S3, S8 | inline (backup + setup) | done | backup `lodan_backup_2026-10-20_094726.full.tar.zst` (9.22 MB, SHA256 `B64E1994…`); data dir de prueba `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data` inicializado y restaurado (puerto 54331, 951 registros vigentes, Ollama no disponible); binario activo `C:\Users\4ntoniomj\bin\lodan.exe` funcional |
-| **T2** | S4, S5, S6, S12, S13 | delegated worker | pending | awaits T1; S12-S13 extienden T2 con filtros de primera clase |
+| **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. **2 tests RED por gap conocido**: `TestHandleRecallTagsAllThroughMCP` y `TestRecall/S12/S13_date_from/date_to` — la ficha del tema detectado (topicCard) muestra TODOS los records del tema, sin aplicar los filtros de S12. |
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
 | **T4** | S7 | delegated worker (migración batched) | pending | awaits T3 |
@@ -375,3 +375,26 @@ Una vez verificados, arranca Fase A del runbook (TDD: A.1 `tags_index`, A.2 filt
 **Próximo paso:** T2 (delegated worker). Según feature doc, T2 absorbe S4-S6 + S12-S13 + S15. El runbook Fase A es TDD estricto: tests RED primero, GREEN después, refactor al final.
 
 **Pendiente para sync repo:** verificar que `https://github.com/4ntoniomj/lodan.sync.git` sea accesible desde aquí antes de Fase C del runbook.
+
+### L13 (2026-10-20, evidence, T2 con gaps, decisión pendiente)
+**A.1 tags_index (S15):** verde. Commit `2446c10`.
+**A.3 modo sin Ollama (S4-S6):** verde. Tests RED escritos, GREEN verificado.
+**A.2 filtros en recall (S12-S13):** parcialmente verde. 6 de 8 escenarios pasan; 2 fallan por gap del feature.
+
+**Gaps encontrados durante TDD (todos corregidos en commit `2446c10` salvo el último):**
+
+1. **`Normalize` reemplazaba `/` por `-`** (root fix): contradecía D2 §5 (jerarquía con `/`). Fix: preservar `/` como separador; el índice `topics_compact_slug_idx` (`replace(slug, '-', '')`) sigue funcionando.
+2. **`handleRecall` hacía `queries[0]` con lista vacía** cuando había query vacía + filtros (S12 `TestRecall_EmptyQueryWithFilters`). Fix: rama explícita para `len(queries) == 0`.
+3. **Descripciones de remember/recall/revise excedían 200 caracteres** (regla de `e2e_test.go:160`): código pre-existente, no regresión. Se acortaron.
+4. **Tests asumían 6 herramientas** (`e2e_test.go:154`, `batch_e2e_test.go:188`): ahora son 7 con `tags_index`. Tests y `mcptools/CLAUDE.md` actualizados.
+
+**Gap NO resuelto (decisión pendiente):**
+
+- `topicCard` (`internal/recall/recall.go:666`) corre `ProfileSQL`/`EventsSQL` sin aplicar los filtros S12. Cuando el topic es **detectado** por votación (no pedido), la ficha del tema muestra TODOS los records del tema, ignorando `tags_all`/`tags_any`/`date_from`/`date_to`.
+- Síntomas: `TestHandleRecallTagsAllThroughMCP` espera que con `tags_all=["proyecto-erp-agm", "finca-rebelao"]` solo aparezca #1, pero la ficha del tema `proyecto-erp-agm` muestra también #2. `TestRecall/S12/S13_date_from/date_to` espera que con `date_from=2026-02-01` no aparezca #1 (enero), pero la ficha lo muestra.
+- Tres caminos posibles (necesitan decisión):
+  - (a) **Filtrar la ficha del tema con los filtros S12**: scope creep, cambia comportamiento general del binario. Más útil para el usuario.
+  - (b) **Marcar los 2 tests como fuera de scope** y ajustar las expectativas: la ficha del tema sigue siendo completa; los filtros solo refinan `Resultados`.
+  - (c) **Suprimir la ficha cuando hay query vacía + filtros**: si no hay texto, no hay tema que detectar por votación, no hay ficha. Es la salida más coherente con "query vacía + filtros = solo resultados por filtro".
+
+Sin decisión, el feature no está cerrado.
