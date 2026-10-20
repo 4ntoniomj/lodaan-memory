@@ -283,7 +283,7 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 | **T2** | S4, S5, S6, S12, S13 | inline (TDD arreglando gaps pre-existentes) | partial | A.1 verde; A.2 verde parcial; A.3 verde. Camino (c) aplicado en `12b973a`: `TestHandleRecallTagsAllThroughMCP` ahora PASA. `TestRecall/S12/S13_date_from/date_to` sigue RED porque su query no está vacía — la ficha del tema detectado sigue cargando todos los records del tema sin filtrar.
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
 | **T3** | S9 | inline (TDD con T2) | pending | awaits T2 |
-| **T4** | S7 | delegated worker (migración batched) | pending | awaits T3 |
+| **T4** | S7 | inline (script Go con whitelist) | partial | data dir de prueba: 731/951 records con tag concreta (76.9%, target 80%), 220 huérfanos (23.1%, target <20%), 70 aliases confirmados. Script en `scripts/migrate-taxonomy/` (commit `TBD`). Faltan tags concretos adicionales al whitelist o aceptación del gap. |
 | **T5** | S10 | inline | pending | awaits T4 |
 | **T6** | S11 | inline (smoke test usuario) | pending | awaits T5 merge |
 
