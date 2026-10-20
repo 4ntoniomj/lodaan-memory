@@ -332,3 +332,14 @@ Cada doc incluye al final una sección de Aprobación con items verificables. Ca
 - **D3**: pre-save obligatorio (recall antes de remember), revisión rigurosa de `revisa:`, auto-relación por `tag_link_strength >= 0.85`, `tags_index()` al inicio de sesión.
 - **D4**: target 30 días consecutivos post-merge; métricas §3 (search success rate, connected usage) requieren log parsing.
 - **D5**: tag concreta obligatoria es warning hasta T4 (modo compatibilidad); denylist: `misc, general, varios, info, vago, na, none`.
+
+### L10 (2026-10-20, user, ajustes por feedback directo)
+Antonio revisa las decisiones materiales y modula:
+
+- **D1 — reversible.** La rama `feat/sin-ollama` debe permitir rollback limpio a `main`/`dev` si algo sale mal. Cambios aplicados en commit `388f081`: la migración `0005_taxonomy_constraints` se reduce a solo `ADD CONSTRAINT` (no `DROP INDEX`). El índice `memories_bq_hnsw` y la cola `memories (id) WHERE embedding IS NULL` **se mantienen en la BD**: el server los evita por runtime cuando `--with-embeddings=false`. Si rollback, la BD queda idéntica.
+- **D2 — confirmado en 12.** Sin cambios al spec. `apuntes-` queda fuera.
+- **D3 — confirmado.** Sin cambios al spec. Pre-save obligatorio, `tags_index()`, auto-relación `>= 0.85`, ejemplos nuevos en `EXAMPLE.md`.
+- **D4 — confirmado.** Sin cambios al spec.
+- **D5 — core confirmado, scripts auxiliares fuera.** Cambios aplicados en commit `cb7ef28`: §5 (`sugerir_jerarquia.py`, `audit_taxonomia.py`) queda como referencia futura, no se programa en este round. El core del validador y la integración con la IA se mantienen.
+
+Pendiente: confirmación de aprobación formal de Antonio en cada D (sección §8 de cada spec). Cuando eso llegue, T0.1-T0.5 pasan a `done` y Phase 1 arranca con T1.
