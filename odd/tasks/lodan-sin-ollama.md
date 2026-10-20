@@ -274,11 +274,11 @@ Phase 1 solo arranca cuando Phase 0 (D1-D5) está aprobada. Los specs de impleme
 
 | ID | Specs | Route | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| **T0.1** | D1 (data storage) | inline (diseño) | in_review | docs/specs/data-storage-sin-ollama.md (commit `64c2bf4`); awaits Antonio |
-| **T0.2** | D2 (tag taxonomy) | inline (diseño) | in_review | docs/specs/tag-taxonomy.md (commit `64c2bf4`); awaits Antonio |
-| **T0.3** | D3 (AI skill) | inline (diseño) | in_review | docs/specs/ai-skill-sin-ollama.md (commit `64c2bf4`); awaits Antonio |
-| **T0.4** | D4 (quality bar) | inline (diseño) | in_review | docs/specs/quality-bar.md (commit `64c2bf4`); awaits Antonio |
-| **T0.5** | D5 (validation tooling) | inline (diseño) | in_review | docs/specs/validation-tooling.md (commit `64c2bf4`); awaits Antonio |
+| **T0.1** | D1 (data storage) | inline (diseño) | done | docs/specs/data-storage-sin-ollama.md; reversible refactor (`388f081`) aprobado |
+| **T0.2** | D2 (tag taxonomy) | inline (diseño) | done | docs/specs/tag-taxonomy.md; 12 familias confirmadas |
+| **T0.3** | D3 (AI skill) | inline (diseño) | done | docs/specs/ai-skill-sin-ollama.md; pre-save + tags_index + auto-relación |
+| **T0.4** | D4 (quality bar) | inline (diseño) | done | docs/specs/quality-bar.md; 30 días post-merge |
+| **T0.5** | D5 (validation tooling) | inline (diseño) | done | docs/specs/validation-tooling.md; core confirmado, scripts auxiliares fuera |
 | **T1** | S1, S2, S3, S8 | inline (backup + setup) | pending | awaits T0.1-T0.5 |
 | **T2** | S4, S5, S6, S12, S13 | delegated worker | pending | awaits T1; S12-S13 extienden T2 con filtros de primera clase |
 | **T2b** | S14 | inline (skill update) | pending | awaits T3 |
@@ -343,3 +343,16 @@ Antonio revisa las decisiones materiales y modula:
 - **D5 — core confirmado, scripts auxiliares fuera.** Cambios aplicados en commit `cb7ef28`: §5 (`sugerir_jerarquia.py`, `audit_taxonomia.py`) queda como referencia futura, no se programa en este round. El core del validador y la integración con la IA se mantienen.
 
 Pendiente: confirmación de aprobación formal de Antonio en cada D (sección §8 de cada spec). Cuando eso llegue, T0.1-T0.5 pasan a `done` y Phase 1 arranca con T1.
+
+### L11 (2026-10-20, user, Phase 0 aprobada)
+Antonio aprueba D1-D5 en round único. T0.1-T0.5 pasan a `done`. Phase 0 cerrada. Phase 1 (código) queda autorizada.
+
+**Próximo paso inmediato (T1):** verificación de pre-requisitos operacionales del runbook §3:
+
+- [ ] Binario `lodan` accesible y funcional (`lodan status` reporta OK).
+- [ ] Data dir activo identificable y backupable.
+- [ ] Data dir de prueba `C:\Users\4ntoniomj\AppData\Local\lodan-sin-ollama-data\` inicializado.
+- [ ] Backup `lodan db backup --full` con checksum verificado.
+- [ ] Acceso a `loreanse/lodan.sync` verificado.
+
+Una vez verificados, arranca Fase A del runbook (TDD: A.1 `tags_index`, A.2 filtros en `recall`, A.3 modo sin Ollama).
