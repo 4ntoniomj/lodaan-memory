@@ -1,6 +1,21 @@
 # Codebase
 
-Última actualización: 2026-10-18
+Última actualización: 2026-10-20 (inicio de `feat/sin-ollama`).
+
+## Estado de dependencias operacionales
+
+**A partir de `feat/sin-ollama`:**
+
+| Dependencia | Estado | Cómo se activa |
+|---|---|---|
+| PostgreSQL | **obligatoria** | Siempre requerida. |
+| pgvector | **opcional** | Conservada en schema para `--with-embeddings`. No se elimina. |
+| Ollama | **opcional** | Default off. Activable con `lodan serve --with-embeddings`. |
+| embeddinggemma | **opcional** | Se carga solo si Ollama está activo. |
+
+**Implicación:** el binario de lodan funciona sin Ollama ni embeddings. La búsqueda semántica se reemplaza por full-text + tags concretas + trabajo de la IA.
+
+## Stack
 
 | Tecnología | Tipo | Versión | Notas |
 | :--- | :--- | :--- | :--- |
@@ -24,11 +39,20 @@
 | golang.org/x/sys | librería | v0.47.0 | Servicio de Windows (SCM) y llamadas al sistema |
 | golang.org/x/time | librería | v0.15.0 | Indirecta |
 | PostgreSQL | base de datos | ≥ 16 (desarrollo: 18) | En Windows, conda-forge solo tiene pgvector para PG 16 |
-| pgvector | base de datos (extensión) | ≥ 0.7.0 (objetivo: 0.8.6) | `halfvec`, `binary_quantize`, HNSW |
-| Ollama | servicio externo | desarrollo: 0.34.4 | Embeddings vía `POST /api/embed` |
-| embeddinggemma | modelo de embeddings | `300m-qat-q4_0` (por defecto) | Multilingüe, 768 dimensiones; por defecto, configurable. Umbrales calibrados en `specs/001-nucleo-memoria/calibracion.md` |
+| pgvector | base de datos (extensión) | ≥ 0.7.0 (objetivo: 0.8.6) | `halfvec`, `binary_quantize`, HNSW — opcional, conservado en schema |
+| Ollama | servicio externo | desarrollo: 0.34.4 | **Opcional.** Embeddings vía `POST /api/embed` |
+| embeddinggemma | modelo de embeddings | `300m-qat-q4_0` (por defecto) | **Opcional.** Multilingüe, 768 dimensiones. Umbrales calibrados en `specs/001-nucleo-memoria/calibracion.md` |
 
 > Go, PostgreSQL, pgvector, Ollama y el modelo no aparecen en `go.mod`: `detectar_stack.py` los reporta como «no detectados» y se mantienen documentados a propósito.
+
+## Umbrales calibrados (actualizado `feat/sin-ollama`)
+
+| Umbral | Uso |
+|---|---|
+| **0.7** | Equivalencia de tags (alias candidate) |
+| **0.85** | Auto-relación on-save (related confirmado, rare tags) |
+| **0.92** | Duplicado exacto (no guardar) |
+| **0.40** | Detección de topic por similitud semántica (con Ollama activo) |
 
 ---
 
