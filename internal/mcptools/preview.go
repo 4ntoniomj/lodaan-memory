@@ -25,6 +25,14 @@ func (s *Server) preview(ctx context.Context, items []memory.Item) (*mcp.CallToo
 	for i, pv := range pvs {
 		lines = append(lines, fmt.Sprintf("ítem %d «%s»", i+1, oneLine(pv.Title)))
 		lines = append(lines, "  etiquetas: "+formatTags(pv.Tags))
+		if !memory.HasConcreteTag(pv.Tags) {
+			lines = append(lines, "  falta una etiqueta concreta (proyecto-, persona-, contacto-, proveedor-, cliente-, finca-, vehiculo-, coche-, skill-, herramienta-, recurso-, evento-)")
+		}
+		if _, tRep := memory.RepairMojibake(items[i].Title); tRep {
+			lines = append(lines, "  texto reparado (codificación)")
+		} else if _, cRep := memory.RepairMojibake(items[i].Content); cRep {
+			lines = append(lines, "  texto reparado (codificación)")
+		}
 		if pv.DuplicateOf > 0 {
 			lines = append(lines, fmt.Sprintf("  ya existe: #%d (mismo contenido)", pv.DuplicateOf))
 		}
@@ -41,6 +49,15 @@ func (s *Server) preview(ctx context.Context, items []memory.Item) (*mcp.CallToo
 			slugs = append(slugs, r.Topic.Slug)
 			if r.Topic.ID != 0 {
 				tagIDs = append(tagIDs, r.Topic.ID)
+			}
+		}
+		if pv.DuplicateOf == 0 {
+			if near, found, _ := memory.FindNearDuplicate(ctx, s.d.Pool, items[i].Content, items[i].Key, tagIDs); found {
+				if near.Sim >= 0.90 {
+					lines = append(lines, fmt.Sprintf("  casi idéntico a #%d (parecido %.2f)", near.ID, near.Sim))
+				} else if near.Sim >= 0.75 && near.SharedTag {
+					lines = append(lines, fmt.Sprintf("  ¿duplicado?: #%d (parecido %.2f)", near.ID, near.Sim))
+				}
 			}
 		}
 		links, err := s.d.Recall.ConnectedByTags(ctx, tagIDs, maxKeyLinks)
