@@ -168,7 +168,7 @@ No hay comandos de terminal para guardar o recuperar: tú hablas en lenguaje nat
 
 | Tú dices | La IA usa |
 | :--- | :--- |
-| «Entreno por la tarde» o «hemos decidido usar Postgres» | `remember`: guarda un registro con título, contenido, tipo y etiquetas (generales como `#agridemur` y concretas como `#coche-4860ngl`) |
+| «Entreno por la tarde» o «hemos decidido usar Postgres» | `remember`: guarda un registro con título, contenido, tipo y etiquetas (exige al menos una concreta como `#coche-4860ngl` o `#proyecto-agm`). Acepta `force: true` para guardar casi duplicados |
 | «Antes de guardarlo, revísalo» | `remember` con `preview: true`: corre todas las comprobaciones sin guardar nada (etiquetas, duplicado, clave, alias, conectados, `revisa:`) |
 | «Recuérdame qué decidimos sobre la base de datos» | `recall`: recupera la ficha del tema, los últimos eventos, los resultados y lo conectado por etiquetas |
 | «¿De qué hablamos la última vez?» | `session` con `action: last` |
@@ -213,7 +213,7 @@ Todos los subcomandos aceptan `-h` para mostrar sus opciones (`lodan <subcomando
 | Comando | Descripción | Ejemplo |
 | :--- | :--- | :--- |
 | `serve` | Arranca el servidor MCP: stdio por defecto, `--http` (con `--addr`) para HTTP local | `./lodan serve` |
-| `db` | Gestiona el PostgreSQL local: `init`, `start`, `stop`, `status`, `backup`, `restore` | `./lodan db status` |
+| `db` | Gestiona el PostgreSQL local: `init`, `start`, `stop`, `status`, `backup`, `restore`, `fix-encoding` | `./lodan db status` |
 | `migrate` | Aplica las migraciones pendientes (sin subcomandos) | `./lodan migrate` |
 | `status` | Muestra el estado de la base de datos y de Ollama | `./lodan status` |
 | `install` | Instala lodan: PostgreSQL, Ollama, servicio de sistema, clientes MCP y skill. Opciones: `--yes`, `--dry-run`, `--skip-ollama`, `--skip-service`, `--skip-clients`, `--only <cliente>` | `./lodan install --dry-run` |
@@ -294,6 +294,15 @@ En Windows el PostgreSQL del servicio corre bajo la cuenta LocalSystem. Un `loda
 ### Retención de backups
 
 La gestión automática de retención (eliminar backups antiguos) se implementará mediante un script bash en futuro. Por ahora, mantén el directorio de backups manualmente.
+
+### Reparación de codificación (`lodan db fix-encoding`)
+
+Detecta y repara texto con mojibake (caracteres mal codificados originados al leer UTF-8 como Windows-1252 y volver a guardarlo, como `AlbarÃ¡n` → `Albarán`).
+
+```bash
+./lodan db fix-encoding            # Simulación: lista los registros afectados sin modificar nada
+./lodan db fix-encoding --apply    # Aplica las reparaciones y recalcula content_hash, tsv y updated_at
+```
 
 ---
 
@@ -393,7 +402,7 @@ También ver [`CODEBASE.md`](CODEBASE.md) para el stack con sus versiones y el e
 
 lodan expone **máximo 6 herramientas** vía MCP (stdio o HTTP streamable):
 
-1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota) con etiquetas (`tags`/`topics`, juntas, máx. 8: generales como `#agridemur` y concretas como `#coche-4860ngl`). Deduplica, resuelve las etiquetas y los alias confirmados, crea las relaciones pedidas con `relate` y, debajo de cada registro, lista con `revisa:` hasta 6 registros que la IA debe comprobar por si lo contradicen o se relacionan: los de las mismas etiquetas (aunque no se parezcan), los que comparten alguna palabra y los cercanos en significado. El servidor no crea relaciones solo por parecido; las etiquetas nuevas parecidas a otras se guardan como están y aparecen como `¿alias?` para que la IA las confirme. Con `preview: true`, corre todas las comprobaciones sin guardar nada.
+1. **`remember`** — Guarda registros (dato, preferencia, decisión, evento o nota) con etiquetas (`tags`/`topics`, juntas, máx. 8: al menos una concreta de las 12 familias como `#proyecto-agm` o `#coche-4860ngl`, más 1-3 generales como `#agridemur`). Exige al menos una etiqueta concreta por ítem (`item N no guardado: falta una etiqueta concreta (...)`). Detecta y repara mojibake automáticamente (`texto reparado (codificación)`). Bloquea casi duplicados (similitud ≥ 0.90 con sugerencia de actualización o `force: true` para forzar el guardado) y avisa con `¿duplicado?` para similitudes entre 0.75 y 0.90 con etiquetas compartidas. Deduplica por hash exacto, resuelve etiquetas y alias confirmados, crea relaciones pedidas con `relate` y lista candidatos con `revisa:`. Con `preview: true`, corre todas las comprobaciones sin guardar nada. Con `WithEmbeddings` activo en el servidor, añade la nota de embeddings pendientes; en la edición lite se omite.
 2. **`recall`** — Recupera lo relevante para una o varias preguntas (`queries`) en lenguaje natural: ficha del tema, últimos eventos y resultados, en un bloque por pregunta; al final, los registros conectados por las etiquetas concretas del primer resultado (ranking por rareza: `Σ ln(N/n)`, umbral `tag_link_strength` por defecto 3.0).
 3. **`get`** — Devuelve el contenido completo, las etiquetas, la clave y las relaciones de registros concretos por id.
 4. **`revise`** — Cambia uno o varios registros (`ops`): `update`, `supersede`, `invalidate`, `delete` (definitivo, con `confirm`); gestiona relaciones (`relate`, `confirm_relation`, `reject_relation`); aplica alias (`alias`, `reject_alias`); guarda veredictos sobre conflictos con su confianza (`verdict`: `contradice`/`sustituye`/`compatible`/`no_relacionado`; ≥ 0.7 aplica, < 0.7 queda pendiente); o junta ≥ 2 registros en uno nuevo (`merge`, siempre con vista previa antes de `confirm: true` y `fingerprint`).
