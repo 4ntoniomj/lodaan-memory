@@ -28,7 +28,7 @@ Uso:
 
 Subcomandos:
   serve     Arranca el servidor MCP (stdio por defecto, --http para HTTP local)
-  db        Gestiona el PostgreSQL local: init | start | stop | status | backup | restore
+  db        Gestiona el PostgreSQL local: init | start | stop | status | backup | restore | fix-encoding
   migrate   Aplica las migraciones pendientes
   status    Muestra el estado de la base de datos y de Ollama
   install   Instala lodan: PostgreSQL, Ollama, servicio de sistema, clientes MCP y skill

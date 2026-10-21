@@ -413,33 +413,36 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		TextOnly: textOnly,
 	}
 
-	// Fusión: los registros de la ficha no se repiten en los resultados.
-	shown := make(map[int64]bool, len(profile)+len(events))
-	for _, it := range profile {
-		shown[it.ID] = true
-	}
-	for _, it := range events {
-		shown[it.ID] = true
-	}
-
-	var ids []int64
-	if notice != "" {
-		ids = textIDs
-	} else {
-		var err error
-		ids, err = s.fuse(ctx, tp, semantic, textIDs, shown)
-		if err != nil {
-			return Result{}, err
-		}
-	}
-
 	// Tema detectado: mostrar solo registros de la ficha que coincidan con la consulta.
+	// Se filtra antes de la fusión, para que lo que sale de la ficha pueda seguir
+	// apareciendo en los resultados.
 	if tp != nil && via != TopicViaRequested && query != "" {
 		var err error
 		if res.Profile, err = s.filterTopicItemsMatching(ctx, res.Profile, query); err != nil {
 			return Result{}, err
 		}
 		if res.Events, err = s.filterTopicItemsMatching(ctx, res.Events, query); err != nil {
+			return Result{}, err
+		}
+	}
+
+	// Fusión: los registros de la ficha no se repiten en los resultados.
+	shown := make(map[int64]bool, len(res.Profile)+len(res.Events))
+	for _, it := range res.Profile {
+		shown[it.ID] = true
+	}
+	for _, it := range res.Events {
+		shown[it.ID] = true
+	}
+
+	var ids []int64
+	if notice != "" {
+		// Búsqueda alternativa: sin fusión, pero tampoco se repite lo que ya muestra la ficha.
+		ids = slices.DeleteFunc(slices.Clone(textIDs), func(id int64) bool { return shown[id] })
+	} else {
+		var err error
+		ids, err = s.fuse(ctx, tp, semantic, textIDs, shown)
+		if err != nil {
 			return Result{}, err
 		}
 	}
@@ -672,7 +675,7 @@ func (s *Service) filterTopicItemsMatching(ctx context.Context, items []Item, qu
 		ids[i] = it.ID
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id FROM memories
-		WHERE id = ANY($1) AND tsv @@ websearch_to_tsquery('lodan_es', $2::text)`, ids, query)
+		WHERE id = ANY($1) AND tsv @@ `+textQuery("$2"), ids, query)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo filtrar la ficha del tema por consulta: %w", err)
 	}

@@ -25,7 +25,7 @@ func (s *Server) preview(ctx context.Context, items []memory.Item) (*mcp.CallToo
 	for i, pv := range pvs {
 		lines = append(lines, fmt.Sprintf("ítem %d «%s»", i+1, oneLine(pv.Title)))
 		lines = append(lines, "  etiquetas: "+formatTags(pv.Tags))
-		if !memory.HasConcreteTag(pv.Tags) {
+		if !s.d.ConcreteTagOptional && !memory.HasConcreteTag(pv.Tags) {
 			lines = append(lines, "  falta una etiqueta concreta (proyecto-, persona-, contacto-, proveedor-, cliente-, finca-, vehiculo-, coche-, skill-, herramienta-, recurso-, evento-)")
 		}
 		if _, tRep := memory.RepairMojibake(items[i].Title); tRep {
@@ -57,6 +57,17 @@ func (s *Server) preview(ctx context.Context, items []memory.Item) (*mcp.CallToo
 					lines = append(lines, fmt.Sprintf("  casi idéntico a #%d (parecido %.2f)", near.ID, near.Sim))
 				} else if near.Sim >= 0.75 && near.SharedTag {
 					lines = append(lines, fmt.Sprintf("  ¿duplicado?: #%d (parecido %.2f)", near.ID, near.Sim))
+				}
+			}
+			prior := make([]string, i)
+			for j := range prior {
+				prior[j] = items[j].Content
+			}
+			if bnear, found, _ := memory.FindNearInBatch(ctx, s.d.Pool, items[i].Content, prior); found {
+				if bnear.Sim >= 0.90 {
+					lines = append(lines, fmt.Sprintf("  casi idéntico al item %d (parecido %.2f)", bnear.Index+1, bnear.Sim))
+				} else if bnear.Sim >= 0.75 && sharesTag(pv.Tags, pvs[bnear.Index].Tags) {
+					lines = append(lines, fmt.Sprintf("  ¿duplicado?: item %d (parecido %.2f)", bnear.Index+1, bnear.Sim))
 				}
 			}
 		}

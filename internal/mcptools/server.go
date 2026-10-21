@@ -47,6 +47,9 @@ type Deps struct {
 	// gate FillPending without going through the full Config. False (default):
 	// lodan-sin-ollama runs without Ollama; full-text + tags cubren recall.
 	WithEmbeddings bool
+	// ConcreteTagOptional turns off the concrete tag rule of remember. Only the
+	// tests of features unrelated to that rule set it; the server never does.
+	ConcreteTagOptional bool
 }
 
 // Server is the lodan MCP server: the SDK server with the six tools registered,

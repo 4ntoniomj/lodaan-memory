@@ -12,5 +12,10 @@ BEGIN
 END $$;
 
 ALTER TABLE memories DROP COLUMN tsv;
-ALTER TABLE memories ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('lodan_es', title || ' ' || content)) STORED;
+-- Both configurations: the Spanish stemmer cuts a word differently with and
+-- without its accent ("albarán" -> albaran, "albaran" -> albar), so the column
+-- keeps the lexemes of both and recall queries both (recall.textQuery).
+ALTER TABLE memories ADD COLUMN tsv tsvector GENERATED ALWAYS AS (
+    to_tsvector('spanish', title || ' ' || content) || to_tsvector('lodan_es', title || ' ' || content)
+) STORED;
 CREATE INDEX ON memories USING gin (tsv);

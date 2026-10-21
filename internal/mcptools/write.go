@@ -77,6 +77,7 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		item      memory.Item
 		repaired  bool
 		warning   string
+		tags      []topic.Resolution
 	}
 	var valid []validItemInfo
 	rejectionLines := make(map[int]string)
@@ -87,7 +88,7 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		if err != nil {
 			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
 		}
-		if !memory.HasConcreteTag(resolutions) {
+		if !s.d.ConcreteTagOptional && !memory.HasConcreteTag(resolutions) {
 			rejectionLines[i] = fmt.Sprintf("item %d no guardado: falta una etiqueta concreta (proyecto-, persona-, contacto-, proveedor-, cliente-, finca-, vehiculo-, coche-, skill-, herramienta-, recurso-, evento-)", i+1)
 			continue
 		}
@@ -107,12 +108,32 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 			if near.Sim >= 0.90 && !it.Force {
 				rejectionLines[i] = fmt.Sprintf("item %d no guardado: casi idéntico a #%d (parecido %.2f); si es un cambio, usa revise update o key, o force: true", i+1, near.ID, near.Sim)
 				continue
-			} else if (near.Sim >= 0.90 && it.Force) || (near.Sim >= 0.70 && near.SharedTag) {
+			} else if (near.Sim >= 0.90 && it.Force) || (near.Sim >= 0.75 && near.SharedTag) {
 				warning = fmt.Sprintf("  ¿duplicado?: #%d (parecido %.2f)", near.ID, near.Sim)
 			}
 		}
 
+		// The items of this same call are not saved yet: compare with the ones accepted before.
+		prior := make([]string, len(valid))
+		for v, vi := range valid {
+			prior[v] = vi.item.Content
+		}
+		bnear, bfound, err := memory.FindNearInBatch(ctx, s.d.Pool, items[i].Content, prior)
+		if err != nil {
+			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
+		}
+		if bfound {
+			other := valid[bnear.Index]
+			if bnear.Sim >= 0.90 && !it.Force {
+				rejectionLines[i] = fmt.Sprintf("item %d no guardado: casi idéntico al item %d (parecido %.2f); si es un cambio, usa revise update o key, o force: true", i+1, other.origIndex+1, bnear.Sim)
+				continue
+			} else if warning == "" && (bnear.Sim >= 0.90 || (bnear.Sim >= 0.75 && sharesTag(resolutions, other.tags))) {
+				warning = fmt.Sprintf("  ¿duplicado?: item %d (parecido %.2f)", other.origIndex+1, bnear.Sim)
+			}
+		}
+
 		valid = append(valid, validItemInfo{
+			tags:      resolutions,
 			origIndex: i,
 			item:      items[i],
 			repaired:  repairedFlags[i],
@@ -455,4 +476,26 @@ func (s *Server) handleRevise(ctx context.Context, req *mcp.CallToolRequest, in 
 		results[i] = opResult{text: line, err: err}
 	}
 	return batchResult(results), nil, nil
+}
+
+// sharesTag reports whether two items of the same call have a tag in common.
+func sharesTag(a, b []topic.Resolution) bool {
+	slugs := make(map[string]bool, len(a))
+	for _, r := range a {
+		slugs[tagSlug(r)] = true
+	}
+	for _, r := range b {
+		if slugs[tagSlug(r)] {
+			return true
+		}
+	}
+	return false
+}
+
+// tagSlug is the slug a resolution will be saved under.
+func tagSlug(r topic.Resolution) string {
+	if r.Topic.Slug != "" {
+		return r.Topic.Slug
+	}
+	return r.Requested
 }
