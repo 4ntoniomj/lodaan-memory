@@ -81,6 +81,9 @@ func (r Result) lines() []string {
 	if r.TextOnly {
 		out = append(out, textOnlyLine)
 	}
+	if r.Notice != "" {
+		out = append(out, r.Notice)
+	}
 	if r.Topic != nil {
 		l := "Tema: " + r.Topic.Slug
 		if r.TopicDetected {

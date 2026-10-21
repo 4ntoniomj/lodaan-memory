@@ -21,6 +21,7 @@ const TextRankCap = 2000
 // are AND-combined.
 type TextFilter struct {
 	Query          string
+	Mode           string
 	IncludeHistory bool
 	// TagsAll are the topic ids a record must carry ALL of. Empty skips the filter.
 	TagsAll []int32
@@ -33,32 +34,80 @@ type TextFilter struct {
 }
 
 // TextCandidatesSQL returns the full-text candidates statement: the ids of the
-// records that match the query and the filters of f, best ranked first. Non-active
-// records are included only with IncludeHistory.
+// records that match the query and the filters of f, best ranked first (or most
+// recent first in list mode). Non-active records are included only with IncludeHistory.
 //
 // Parameters: $1 is the query text, $2 is the include_history flag, $3 is the
 // TagsAll topic ids, $4 is the TagsAny topic ids, $5 is the DateFrom, $6 is the
 // DateTo, and $7 is the number of ids to return. The ranking is computed over at
 // most TextRankCap matches.
 func TextCandidatesSQL(f TextFilter) string {
-	sql := `SELECT id FROM (
-		SELECT id, tsv, occurred_at FROM memories
-		WHERE ($1::text = '' OR tsv @@ websearch_to_tsquery('spanish', $1::text))
-		  AND ($2::bool OR status = 'active')
+	if f.Mode == "list" {
+		return `SELECT id FROM (
+			SELECT m.id, m.tsv, m.occurred_at FROM memories m
+			WHERE ($1::text = '' OR m.tsv @@ websearch_to_tsquery('lodan_es', $1::text))
+			  AND ($2::bool OR m.status = 'active')
+			  AND (cardinality($3::int[]) = 0 OR
+			    (SELECT count(DISTINCT mt.topic_id) FROM memory_topics mt
+			     WHERE mt.memory_id = m.id AND mt.topic_id = ANY($3::int[]) AND mt.active) = cardinality($3::int[]))
+			  AND (cardinality($4::int[]) = 0 OR EXISTS (
+			    SELECT 1 FROM memory_topics mt
+			    WHERE mt.memory_id = m.id AND mt.topic_id = ANY($4::int[]) AND mt.active))
+			  AND ($5::timestamptz IS NULL OR m.occurred_at >= $5::timestamptz)
+			  AND ($6::timestamptz IS NULL OR m.occurred_at <= $6::timestamptz)
+			ORDER BY m.occurred_at DESC, m.id DESC
+			LIMIT ` + strconv.Itoa(TextRankCap) + `
+		) m
+		ORDER BY m.occurred_at DESC, m.id DESC
+		LIMIT $7`
+	}
+
+	return `SELECT id FROM (
+		SELECT m.id, m.tsv, m.occurred_at FROM memories m
+		WHERE ($1::text = '' OR m.tsv @@ websearch_to_tsquery('lodan_es', $1::text))
+		  AND ($2::bool OR m.status = 'active')
+		  AND (cardinality($3::int[]) = 0 OR
+		    (SELECT count(DISTINCT mt.topic_id) FROM memory_topics mt
+		     WHERE mt.memory_id = m.id AND mt.topic_id = ANY($3::int[]) AND mt.active) = cardinality($3::int[]))
+		  AND (cardinality($4::int[]) = 0 OR EXISTS (
+		    SELECT 1 FROM memory_topics mt
+		    WHERE mt.memory_id = m.id AND mt.topic_id = ANY($4::int[]) AND mt.active))
+		  AND ($5::timestamptz IS NULL OR m.occurred_at >= $5::timestamptz)
+		  AND ($6::timestamptz IS NULL OR m.occurred_at <= $6::timestamptz)
 		LIMIT ` + strconv.Itoa(TextRankCap) + `
 	) m
-	WHERE
-	  (cardinality($3::int[]) = 0 OR
-	    (SELECT count(DISTINCT mt.topic_id) FROM memory_topics mt
-	     WHERE mt.memory_id = m.id AND mt.topic_id = ANY($3::int[]) AND mt.active) = cardinality($3::int[]))
-	  AND (cardinality($4::int[]) = 0 OR EXISTS (
-	    SELECT 1 FROM memory_topics mt
-	    WHERE mt.memory_id = m.id AND mt.topic_id = ANY($4::int[]) AND mt.active))
-	  AND ($5::timestamptz IS NULL OR m.occurred_at >= $5::timestamptz)
-	  AND ($6::timestamptz IS NULL OR m.occurred_at <= $6::timestamptz)
-	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, m.id DESC
+	ORDER BY (CASE WHEN $1::text = '' THEN 0 ELSE ts_rank_cd(m.tsv, websearch_to_tsquery('lodan_es', $1::text)) END) DESC, m.id DESC
 	LIMIT $7`
-	return sql
+}
+
+// FuzzyCandidatesSQL returns the fuzzy trigram match statement used when full-text
+// search finds no candidates. Parameters are the same as TextCandidatesSQL.
+func FuzzyCandidatesSQL(f TextFilter) string {
+	return `SELECT id FROM (
+		SELECT m.id, m.occurred_at,
+		       greatest(
+		           word_similarity(unaccent(lower($1::text)), unaccent(lower(m.title || ' ' || m.content))),
+		           similarity(unaccent(lower($1::text)), unaccent(lower(m.title)))
+		       ) AS sim
+		FROM memories m
+		WHERE ($2::bool OR m.status = 'active')
+		  AND (cardinality($3::int[]) = 0 OR
+		    (SELECT count(DISTINCT mt.topic_id) FROM memory_topics mt
+		     WHERE mt.memory_id = m.id AND mt.topic_id = ANY($3::int[]) AND mt.active) = cardinality($3::int[]))
+		  AND (cardinality($4::int[]) = 0 OR EXISTS (
+		    SELECT 1 FROM memory_topics mt
+		    WHERE mt.memory_id = m.id AND mt.topic_id = ANY($4::int[]) AND mt.active))
+		  AND ($5::timestamptz IS NULL OR m.occurred_at >= $5::timestamptz)
+		  AND ($6::timestamptz IS NULL OR m.occurred_at <= $6::timestamptz)
+		  AND (
+		      unaccent(lower(m.title || ' ' || m.content)) % unaccent(lower($1::text))
+		      OR word_similarity(unaccent(lower($1::text)), unaccent(lower(m.title || ' ' || m.content))) >= 0.3
+		      OR similarity(unaccent(lower($1::text)), unaccent(lower(m.title))) >= 0.3
+		  )
+		LIMIT ` + strconv.Itoa(TextRankCap) + `
+	) m
+	ORDER BY m.sim DESC, m.id DESC
+	LIMIT $7`
 }
 
 // CandidateTextSQL is the full-text statement of the review candidates of a new
@@ -68,10 +117,10 @@ func TextCandidatesSQL(f TextFilter) string {
 // TextRankCap matches, as in TextCandidatesSQL.
 var CandidateTextSQL = `SELECT id FROM (
 		SELECT id, tsv FROM memories
-		WHERE tsv @@ websearch_to_tsquery('spanish', $1::text) AND status = 'active' AND NOT (id = ANY($2))
+		WHERE tsv @@ websearch_to_tsquery('lodan_es', $1::text) AND status = 'active' AND NOT (id = ANY($2))
 		LIMIT ` + strconv.Itoa(TextRankCap) + `
 	) m
-	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC
+	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('lodan_es', $1::text)) DESC, id DESC
 	LIMIT $3`
 
 // SharedTagsSQL is the statement of the active records that share tags with a
