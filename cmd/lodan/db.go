@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -49,6 +50,15 @@ func openStack(ctx context.Context, cfg config.Config, logger *log.Logger) (mcpt
 	if err != nil {
 		return mcptools.Deps{}, nil, err
 	}
+	var storedDimsStr, storedModel string
+	if err := pool.QueryRow(ctx, "SELECT value FROM lodan_settings WHERE key = 'embed_dims'").Scan(&storedDimsStr); err == nil {
+		if d, err := strconv.Atoi(storedDimsStr); err == nil && d > 0 {
+			cfg.EmbedDims = d
+		}
+	}
+	if err := pool.QueryRow(ctx, "SELECT value FROM lodan_settings WHERE key = 'embed_model'").Scan(&storedModel); err == nil && storedModel != "" {
+		cfg.EmbedModel = storedModel
+	}
 	if err := database.Migrate(ctx, pool, database.Settings{Dims: cfg.EmbedDims, Model: cfg.EmbedModel}); err != nil {
 		pool.Close()
 		return mcptools.Deps{}, nil, err
@@ -86,6 +96,9 @@ func openStack(ctx context.Context, cfg config.Config, logger *log.Logger) (mcpt
 
 // runDB implements `lodan db init|start|stop|status|backup|restore`.
 func runDB(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "fix-encoding" {
+		return runDBFixEncoding(args[1:], stdout, stderr)
+	}
 	// backup and restore take their own flags after the action, which the generic flag set
 	// below (flags before the action) cannot parse.
 	if len(args) > 0 {
@@ -97,19 +110,21 @@ func runDB(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fs := newFlagSet("db", "lodan db init|start|stop|status|backup|restore", stderr)
+	fs := newFlagSet("db", "lodan db init|start|stop|status|backup|restore|fix-encoding", stderr)
 	if code, done := parseFlags(fs, args); done {
 		return code
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "lodan db: falta la acción (init|start|stop|status|backup|restore)")
+		fmt.Fprintln(stderr, "lodan db: falta la acción (init|start|stop|status|backup|restore|fix-encoding)")
 		return 2
 	}
 	action := fs.Arg(0)
 	switch action {
 	case "init", "start", "stop", "status":
+	case "fix-encoding":
+		return runDBFixEncoding(fs.Args()[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "lodan db: acción desconocida %q (usa init|start|stop|status|backup|restore)\n", action)
+		fmt.Fprintf(stderr, "lodan db: acción desconocida %q (usa init|start|stop|status|backup|restore|fix-encoding)\n", action)
 		return 2
 	}
 
@@ -355,5 +370,42 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	defer cleanup()
 	fmt.Fprintln(stdout, mcptools.StatusLine(ctx, deps))
+	return 0
+}
+
+// runDBFixEncoding implements `lodan db fix-encoding [--apply]`.
+func runDBFixEncoding(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("db fix-encoding", "lodan db fix-encoding [--apply]", stderr)
+	apply := fs.Bool("apply", false, "repara el texto mal codificado en la base de datos")
+	if code, done := parseFlags(fs, args); done {
+		return code
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "lodan db fix-encoding: argumentos inesperados: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db fix-encoding: %v\n", err)
+		return 1
+	}
+
+	ctx, stop := signalContext()
+	defer stop()
+
+	deps, cleanup, err := openStack(ctx, cfg, log.New(stderr, "lodan: ", log.LstdFlags))
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db fix-encoding: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	res, err := deps.Memory.FixEncoding(ctx, *apply)
+	if err != nil {
+		fmt.Fprintf(stderr, "lodan db fix-encoding: %v\n", err)
+		return 1
+	}
+	res.Format(stdout, *apply)
 	return 0
 }

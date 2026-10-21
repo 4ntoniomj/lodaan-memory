@@ -29,6 +29,7 @@ type rememberItem struct {
 	Key        string        `json:"key,omitempty" jsonschema:"Clave de un dato que cambia; sustituye al vigente con la misma clave"`
 	OccurredAt string        `json:"occurred_at,omitempty" jsonschema:"Cuándo ocurrió: RFC3339 o AAAA-MM-DD, hora local (por defecto, ahora)"`
 	Relate     []relateInput `json:"relate,omitempty" jsonschema:"Registros existentes con los que se relaciona (relación confirmada)"`
+	Force      bool          `json:"force,omitempty" jsonschema:"true: guarda aunque sea casi idéntico a otro registro"`
 }
 
 // relateInput is a relation requested when saving an item.
@@ -43,6 +44,7 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		return errorResult(err), nil, nil
 	}
 	items := make([]memory.Item, len(in.Items))
+	repairedFlags := make([]bool, len(in.Items))
 	for i, it := range in.Items {
 		when, err := parseWhen(it.OccurredAt)
 		if err != nil {
@@ -52,9 +54,12 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		for j, r := range it.Relate {
 			relate[j] = memory.RelateTo{ID: r.ID, Kind: r.Relation}
 		}
+		repTitle, tRep := memory.RepairMojibake(it.Title)
+		repContent, cRep := memory.RepairMojibake(it.Content)
+		repairedFlags[i] = tRep || cRep
 		items[i] = memory.Item{
-			Title:      it.Title,
-			Content:    it.Content,
+			Title:      repTitle,
+			Content:    repContent,
 			Kind:       memory.Kind(it.Kind),
 			Tags:       it.Tags,
 			Topics:     it.Topics,
@@ -66,11 +71,109 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 	if in.Preview {
 		return s.preview(ctx, items)
 	}
-	saved, err := s.d.Memory.Remember(ctx, tr, items)
+
+	type validItemInfo struct {
+		origIndex int
+		item      memory.Item
+		repaired  bool
+		warning   string
+	}
+	var valid []validItemInfo
+	rejectionLines := make(map[int]string)
+
+	for i, it := range in.Items {
+		allTags := append(append([]string(nil), it.Tags...), it.Topics...)
+		resolutions, err := s.d.Topics.Peek(ctx, allTags)
+		if err != nil {
+			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
+		}
+		if !memory.HasConcreteTag(resolutions) {
+			rejectionLines[i] = fmt.Sprintf("item %d no guardado: falta una etiqueta concreta (proyecto-, persona-, contacto-, proveedor-, cliente-, finca-, vehiculo-, coche-, skill-, herramienta-, recurso-, evento-)", i+1)
+			continue
+		}
+
+		var topicIDs []int32
+		for _, r := range resolutions {
+			if r.Topic.ID != 0 {
+				topicIDs = append(topicIDs, r.Topic.ID)
+			}
+		}
+		near, found, err := memory.FindNearDuplicate(ctx, s.d.Pool, items[i].Content, items[i].Key, topicIDs)
+		if err != nil {
+			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
+		}
+		var warning string
+		if found {
+			if near.Sim >= 0.90 && !it.Force {
+				rejectionLines[i] = fmt.Sprintf("item %d no guardado: casi idéntico a #%d (parecido %.2f); si es un cambio, usa revise update o key, o force: true", i+1, near.ID, near.Sim)
+				continue
+			} else if (near.Sim >= 0.90 && it.Force) || (near.Sim >= 0.70 && near.SharedTag) {
+				warning = fmt.Sprintf("  ¿duplicado?: #%d (parecido %.2f)", near.ID, near.Sim)
+			}
+		}
+
+		valid = append(valid, validItemInfo{
+			origIndex: i,
+			item:      items[i],
+			repaired:  repairedFlags[i],
+			warning:   warning,
+		})
+	}
+
+	if len(valid) == 0 {
+		outLines := make([]string, len(in.Items))
+		for i := range in.Items {
+			outLines[i] = rejectionLines[i]
+		}
+		return textResult(strings.Join(outLines, "\n")), nil, nil
+	}
+
+	toSave := make([]memory.Item, len(valid))
+	for v, vi := range valid {
+		toSave[v] = vi.item
+	}
+	saved, err := s.d.Memory.Remember(ctx, tr, toSave)
 	if err != nil {
 		return errorResult(err), nil, nil
 	}
-	return textResult(formatReviewed(saved, s.extras(ctx, items, saved), s.reviewCandidates(ctx, items, saved))), nil, nil
+	extras := s.extras(ctx, toSave, saved)
+	cands := s.reviewCandidates(ctx, toSave, saved)
+
+	var outLines []string
+	validMap := make(map[int]int)
+	for v, vi := range valid {
+		validMap[vi.origIndex] = v
+	}
+
+	for i := 0; i < len(in.Items); i++ {
+		if rej, ok := rejectionLines[i]; ok {
+			outLines = append(outLines, rej)
+			continue
+		}
+		v := validMap[i]
+		sv := saved[v]
+		outLines = append(outLines, formatOneSaved(sv, valid[v].repaired, s.d.WithEmbeddings))
+		if valid[v].warning != "" {
+			outLines = append(outLines, valid[v].warning)
+		}
+		for _, sg := range sv.Suggestions {
+			outLines = append(outLines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
+		}
+		if v < len(extras) {
+			if extras[v].key != "" {
+				outLines = append(outLines, fmt.Sprintf("  clave sugerida: %s (sustituiría a #%d)", extras[v].key, extras[v].keyFor))
+			}
+			if len(extras[v].links) > 0 {
+				outLines = append(outLines, "  conectado por etiquetas: "+formatLinks(extras[v].links))
+			}
+		}
+		if v < len(cands) {
+			for _, c := range cands[v] {
+				outLines = append(outLines, "  revisa: "+c.Line())
+			}
+		}
+	}
+	return textResult(strings.Join(outLines, "\n")), nil, nil
 }
 
 // savedExtras is what remember reports about a saved item besides its line:
@@ -202,7 +305,7 @@ func formatSaved(saved []memory.Saved) string {
 func formatReviewed(saved []memory.Saved, extras []savedExtras, candidates [][]recall.Item) string {
 	lines := make([]string, 0, len(saved))
 	for i, sv := range saved {
-		lines = append(lines, formatOneSaved(sv))
+		lines = append(lines, formatOneSaved(sv, false, true))
 		for _, sg := range sv.Suggestions {
 			lines = append(lines, fmt.Sprintf("  ¿alias?: #%s ≈ #%s (%d registros)", sg.New, sg.Existing, sg.Records))
 		}
@@ -223,7 +326,7 @@ func formatReviewed(saved []memory.Saved, extras []savedExtras, candidates [][]r
 	return strings.Join(lines, "\n")
 }
 
-func formatOneSaved(sv memory.Saved) string {
+func formatOneSaved(sv memory.Saved, repaired bool, withEmbeddings bool) string {
 	if sv.Duplicate {
 		return fmt.Sprintf("#%d ya existía (duplicado): «%s»", sv.ID, oneLine(sv.Title))
 	}
@@ -231,7 +334,10 @@ func formatOneSaved(sv memory.Saved) string {
 	if len(sv.Topics) > 0 {
 		parts = append(parts, "etiquetas: "+formatTags(sv.Topics))
 	}
-	if sv.Pending {
+	if repaired {
+		parts = append(parts, "texto reparado (codificación)")
+	}
+	if withEmbeddings {
 		parts = append(parts, "embedding y parecidos pendientes (se calculan en segundo plano)")
 	}
 	if len(sv.Superseded) > 0 {
