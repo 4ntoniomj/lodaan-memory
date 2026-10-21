@@ -71,14 +71,15 @@ func openStack(ctx context.Context, cfg config.Config, logger *log.Logger) (mcpt
 	}
 	sessions := session.NewManager(pool, time.Duration(cfg.SessionIdleMinutes)*time.Minute)
 	deps := mcptools.Deps{
-		Pool:     pool,
-		Memory:   memory.NewService(pool, emb, topics, sessions, cfg.DupSimilarity, time.Duration(cfg.EmbedTimeoutMs)*time.Millisecond),
-		Recall:   recall.NewService(pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicDetectThreshold: cfg.TopicDetectSimilarity, TagLinkStrength: cfg.TagLinkStrength}),
-		Sessions: sessions,
-		Topics:   topics,
-		Embedder: emb,
-		Cfg:      cfg,
-		Version:  version,
+		Pool:           pool,
+		Memory:         memory.NewService(pool, emb, topics, sessions, cfg.DupSimilarity, time.Duration(cfg.EmbedTimeoutMs)*time.Millisecond),
+		Recall:         recall.NewService(pool, emb, topics, recall.Options{MaxBytes: cfg.RecallMaxBytes, TopicDetectThreshold: cfg.TopicDetectSimilarity, TagLinkStrength: cfg.TagLinkStrength}),
+		Sessions:       sessions,
+		Topics:         topics,
+		Embedder:       emb,
+		Cfg:            cfg,
+		Version:        version,
+		WithEmbeddings: cfg.WithEmbeddings,
 	}
 	return deps, pool.Close, nil
 }

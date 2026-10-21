@@ -31,7 +31,9 @@ func batchSizeError(n int, noun string) error {
 
 // recallQueries returns the queries of a recall request: query first, then
 // queries, trimmed, without empty ones and without exact repeats. The cap is
-// checked before removing repeats.
+// checked before removing repeats. A query is optional when the request carries
+// at least one filter (tags_all, tags_any, date_from or date_to): with no query
+// and no filters the call fails.
 func recallQueries(in recallInput) ([]string, error) {
 	var all []string
 	for _, q := range append([]string{in.Query}, in.Queries...) {
@@ -39,7 +41,9 @@ func recallQueries(in recallInput) ([]string, error) {
 			all = append(all, q)
 		}
 	}
-	if len(all) == 0 {
+	hasFilters := len(in.TagsAll) > 0 || len(in.TagsAny) > 0 ||
+		strings.TrimSpace(in.DateFrom) != "" || strings.TrimSpace(in.DateTo) != ""
+	if len(all) == 0 && !hasFilters {
 		return nil, fmt.Errorf("hay que enviar query o queries")
 	}
 	if len(all) > memory.MaxBatch {

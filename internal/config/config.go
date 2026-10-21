@@ -34,6 +34,12 @@ type Config struct {
 	SyncMachine           string  `json:"sync_machine,omitempty"`  // this machine's folder in the sync repository
 	SyncKeyFile           string  `json:"sync_key_file,omitempty"` // age key; kept outside DataDir so backups never carry it
 	SyncIntervalMinutes   int     `json:"sync_interval_minutes"`   // periodic sync from the service; 0 = off
+	// WithEmbeddings activa el worker de embeddings (FillPending) en el bucle
+	// de mantenimiento. Por defecto false: lodan-sin-ollama corre sin Ollama y
+	// el binario sigue sirviendo el MCP solo con full-text + tags. Activar
+	// cuando Ollama está corriendo y quieres que los registros y temas
+	// pendientes se vayan rellenando en segundo plano.
+	WithEmbeddings bool `json:"with_embeddings,omitempty"`
 }
 
 // Default returns the configuration with built-in defaults.
@@ -132,6 +138,16 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("%s: %q no es un entero válido", i.name, v)
 		}
 		*i.dst = n
+	}
+
+	// LODAN_WITH_EMBEDDINGS acepta "1", "t", "true" (case-insensitive) y
+	// "0", "f", "false". Vacío se ignora (se conserva el valor del JSON).
+	if v := strings.TrimSpace(os.Getenv("LODAN_WITH_EMBEDDINGS")); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return fmt.Errorf("LODAN_WITH_EMBEDDINGS: %q no es un booleano válido", v)
+		}
+		cfg.WithEmbeddings = b
 	}
 
 	floats := []struct {
@@ -251,4 +267,16 @@ func DetectPGBinDir(cfg Config) (string, error) {
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// parseBool acepta "1", "t", "true", "yes", "on" como true y "0", "f", "false",
+// "no", "off" como false (case-insensitive). Rechaza cualquier otra cosa.
+func parseBool(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "t", "true", "yes", "on":
+		return true, nil
+	case "0", "f", "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("valor no reconocido")
 }

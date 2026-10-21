@@ -234,7 +234,7 @@ func TestConsultasSonLasDeProduccion(t *testing.T) {
 	for name, pair := range map[string][2]string{
 		"Q1":  {s.candidates, memory.CandidatesSQL(64)},
 		"Q2":  {s.rerank, memory.RerankSQL(64)},
-		"Q3":  {s.text, recall.TextCandidatesSQL(false)},
+		"Q3":  {s.text, recall.TextCandidatesSQL(recall.TextFilter{})},
 		"Q4a": {s.profile, recall.ProfileSQL},
 		"Q4b": {s.events, recall.EventsSQL},
 	} {

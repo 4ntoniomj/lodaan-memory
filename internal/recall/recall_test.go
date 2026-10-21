@@ -576,4 +576,355 @@ func TestRecall(t *testing.T) {
 			t.Errorf("con Limit 50 y MaxLimit 4 hubo %d resultados, se esperaban 4", n)
 		}
 	})
+
+	// ---------------------------------------------------------------- S12/S13 filtros
+
+	// saveTags crea tags concretas (slugs) en la BD; devuelve los slugs ya
+	// normalizados (topic.Normalize) para que coincidan con la forma en que el
+	// resolver de memory.Remember los vincularía (la normalización convierte "/"
+	// en "-", así que sin normalizar terminarían creando tags duplicadas).
+	saveTags := func(t *testing.T, e *env, rawSlugs ...string) []string {
+		t.Helper()
+		out := make([]string, 0, len(rawSlugs))
+		for _, s := range rawSlugs {
+			slug := topic.Normalize(s)
+			if slug == "" {
+				t.Fatalf("la etiqueta %q se normaliza a vacío", s)
+			}
+			if _, err := e.pool.Exec(e.ctx, `INSERT INTO topics (slug) VALUES ($1) ON CONFLICT (slug) DO NOTHING`, slug); err != nil {
+				t.Fatalf("no se pudo crear la etiqueta %q: %v", slug, err)
+			}
+			out = append(out, slug)
+		}
+		return out
+	}
+
+	// relinkTopics recalcula memory_topics (active=true, kind y ts desde memories) para los
+	// ids dados, simulando lo que hace Remember sin pasar por la embedding de los tags.
+	relinkTopics := func(t *testing.T, e *env, id int64, tags []string) {
+		t.Helper()
+		if _, err := e.pool.Exec(e.ctx, `DELETE FROM memory_topics WHERE memory_id = $1`, id); err != nil {
+			t.Fatalf("no se pudieron borrar las tags anteriores de #%d: %v", id, err)
+		}
+		for _, raw := range tags {
+			slug := topic.Normalize(raw)
+			if slug == "" {
+				t.Fatalf("la etiqueta %q se normaliza a vacío", raw)
+			}
+			if _, err := e.pool.Exec(e.ctx,
+				`INSERT INTO memory_topics (topic_id, memory_id, kind, active, ts)
+				 SELECT t.id, $1, m.kind, m.status = 'active', m.occurred_at
+				 FROM topics t, memories m WHERE t.slug = $2 AND m.id = $1`,
+				id, slug); err != nil {
+				t.Fatalf("no se pudo vincular #%d con la etiqueta %q: %v", id, slug, err)
+			}
+		}
+	}
+
+	run("S12/S13 tags_all: AND entre etiquetas", func(t *testing.T, e *env) {
+		tags := saveTags(t, e, "proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-rebelao")
+
+		all := e.save(t, memory.Item{Title: "Cosecha Rebelao", Content: "Cosecha en Rebelao del proyecto erp-agm",
+			Kind: memory.KindFact, Topics: tags})
+		relinkTopics(t, e, all, tags)
+		two := e.save(t, memory.Item{Title: "Cosecha Royalveg", Content: "Cosecha en Royalveg",
+			Kind: memory.KindFact, Topics: []string{"proyecto-erp-agm", "finca-royalveg"}})
+		relinkTopics(t, e, two, []string{"proyecto-erp-agm", "finca-royalveg"})
+		one := e.save(t, memory.Item{Title: "Otro proyecto", Content: "Trabajo en proyecto independiente",
+			Kind: memory.KindNote, Topics: []string{"proyecto-otro"}})
+		relinkTopics(t, e, one, []string{"proyecto-otro"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+		res := e.recall(t, svc, Request{
+			Query:   "cosecha proyecto",
+			TagsAll: tags,
+		})
+		got := idsOf(res.Results)
+		if !slices.Contains(got, all) {
+			t.Errorf("tags_all=%v debería traer #%d: results=%v", tags, all, got)
+		}
+		for _, banned := range []int64{two, one} {
+			if slices.Contains(got, banned) {
+				t.Errorf("tags_all=%v NO debería traer #%d: results=%v", tags, banned, got)
+			}
+		}
+	})
+
+	run("S12/S13 tags_any: OR entre etiquetas", func(t *testing.T, e *env) {
+		saveTags(t, e, "finca-rebelao", "finca-royalveg", "finca-pazo")
+		rebelao := e.save(t, memory.Item{Title: "Rebelao", Content: "Cosecha en Rebelao",
+			Kind: memory.KindFact, Topics: []string{"finca-rebelao"}})
+		relinkTopics(t, e, rebelao, []string{"finca-rebelao"})
+		royalveg := e.save(t, memory.Item{Title: "Royalveg", Content: "Cosecha en Royalveg",
+			Kind: memory.KindFact, Topics: []string{"finca-royalveg"}})
+		relinkTopics(t, e, royalveg, []string{"finca-royalveg"})
+		pazo := e.save(t, memory.Item{Title: "Pazo", Content: "Cosecha en Pazo",
+			Kind: memory.KindFact, Topics: []string{"finca-pazo"}})
+		relinkTopics(t, e, pazo, []string{"finca-pazo"})
+		other := e.save(t, memory.Item{Title: "Otro", Content: "Cosecha en otra finca",
+			Kind: memory.KindFact, Topics: []string{"finca-otra"}})
+		relinkTopics(t, e, other, []string{"finca-otra"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+		res := e.recall(t, svc, Request{
+			Query:   "cosecha",
+			TagsAny: []string{"finca-rebelao", "finca-royalveg"},
+		})
+		got := idsOf(res.Results)
+		for _, want := range []int64{rebelao, royalveg} {
+			if !slices.Contains(got, want) {
+				t.Errorf("tags_any=[rebelao, royalveg] debería traer #%d: results=%v", want, got)
+			}
+		}
+		for _, banned := range []int64{pazo, other} {
+			if slices.Contains(got, banned) {
+				t.Errorf("tags_any=[rebelao, royalveg] NO debería traer #%d: results=%v", banned, got)
+			}
+		}
+	})
+
+	run("S12/S13 date_from/date_to: rango de fechas", func(t *testing.T, e *env) {
+		enero := e.save(t, memory.Item{Title: "Enero", Content: "Actividad en enero del proyecto",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm"}, OccurredAt: day(2026, 1, 15)})
+		marzo := e.save(t, memory.Item{Title: "Marzo", Content: "Actividad en marzo del proyecto",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm"}, OccurredAt: day(2026, 3, 15)})
+		mayo := e.save(t, memory.Item{Title: "Mayo", Content: "Actividad en mayo del proyecto",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm"}, OccurredAt: day(2026, 5, 15)})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+
+		// Solo date_from: trae marzo y mayo (enero queda fuera por la fecha).
+		res := e.recall(t, svc, Request{
+			Query:   "actividad",
+			DateFrom: "2026-02-01",
+		})
+		got := idsOf(res.all())
+		if !slices.Contains(got, mayo) || !slices.Contains(got, marzo) {
+			t.Errorf("con date_from=2026-02-01 debería traer #%d y #%d: got=%v", mayo, marzo, got)
+		}
+		if slices.Contains(got, enero) {
+			t.Errorf("con date_from=2026-02-01 NO debería traer #%d (enero): got=%v", enero, got)
+		}
+
+		// date_from + date_to: solo marzo.
+		res = e.recall(t, svc, Request{
+			Query:    "actividad",
+			DateFrom: "2026-02-01",
+			DateTo:   "2026-04-01",
+		})
+		got = idsOf(res.all())
+		if !slices.Contains(got, marzo) {
+			t.Errorf("con date_from=2026-02-01 y date_to=2026-04-01 debería traer #%d (marzo): got=%v", marzo, got)
+		}
+		for _, banned := range []int64{enero, mayo} {
+			if slices.Contains(got, banned) {
+				t.Errorf("con rango feb-abril NO debería traer #%d: got=%v", banned, got)
+			}
+		}
+	})
+
+	run("S12/S13 tags_all + tags_any: AND entre grupos", func(t *testing.T, e *env) {
+		saveTags(t, e, "proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-rebelao", "finca-royalveg")
+
+		all3 := e.save(t, memory.Item{Title: "Rebelao cosechas", Content: "Cosecha Rebelao del proyecto erp-agm",
+			Kind: memory.KindFact, Topics: []string{"proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-rebelao"}})
+		relinkTopics(t, e, all3, []string{"proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-rebelao"})
+		// Tiene las dos primeras (tags_all) y una de las any.
+		partial := e.save(t, memory.Item{Title: "Royalveg cosechas", Content: "Cosecha Royalveg del proyecto erp-agm",
+			Kind: memory.KindFact, Topics: []string{"proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-royalveg"}})
+		relinkTopics(t, e, partial, []string{"proyecto-erp-agm", "proyecto-erp-agm/cosechas", "finca-royalveg"})
+		// Solo una de las tags_all: queda fuera aunque tenga finca-rebelao.
+		one := e.save(t, memory.Item{Title: "Otro proyecto Rebelao", Content: "Cosecha Rebelao pero de otro proyecto",
+			Kind: memory.KindFact, Topics: []string{"proyecto-otro", "finca-rebelao"}})
+		relinkTopics(t, e, one, []string{"proyecto-otro", "finca-rebelao"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+		res := e.recall(t, svc, Request{
+			Query:   "cosecha",
+			TagsAll: []string{"proyecto-erp-agm", "proyecto-erp-agm/cosechas"},
+			TagsAny: []string{"finca-rebelao", "finca-royalveg"},
+		})
+		got := idsOf(res.all())
+		for _, want := range []int64{all3, partial} {
+			if !slices.Contains(got, want) {
+				t.Errorf("AND-OR debería traer #%d: got=%v", want, got)
+			}
+		}
+		if slices.Contains(got, one) {
+			t.Errorf("AND-OR NO debería traer #%d (le falta tags_all): got=%v", one, got)
+		}
+	})
+
+	run("S12/S13 fecha + tags: combinación de filtros", func(t *testing.T, e *env) {
+		saveTags(t, e, "proyecto-erp-agm", "finca-rebelao")
+		recent := e.save(t, memory.Item{Title: "Reciente", Content: "Cosecha Rebelao reciente",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm", "finca-rebelao"}, OccurredAt: day(2026, 5, 10)})
+		relinkTopics(t, e, recent, []string{"proyecto-erp-agm", "finca-rebelao"})
+		old := e.save(t, memory.Item{Title: "Antiguo", Content: "Cosecha Rebelao antigua",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm", "finca-rebelao"}, OccurredAt: day(2025, 5, 10)})
+		relinkTopics(t, e, old, []string{"proyecto-erp-agm", "finca-rebelao"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+		res := e.recall(t, svc, Request{
+			Query:    "cosecha rebelao",
+			TagsAll:  []string{"proyecto-erp-agm", "finca-rebelao"},
+			DateFrom: "2026-01-01",
+		})
+		got := idsOf(res.Results)
+		if !slices.Contains(got, recent) {
+			t.Errorf("fecha + tags debería traer #%d (reciente): results=%v", recent, got)
+		}
+		if slices.Contains(got, old) {
+			t.Errorf("fecha + tags NO debería traer #%d (antiguo): results=%v", old, got)
+		}
+	})
+
+	run("S12/S13 query vacía + tags: devuelve por filtro sin texto", func(t *testing.T, e *env) {
+		saveTags(t, e, "proyecto-erp-agm", "finca-rebelao")
+		recent := e.save(t, memory.Item{Title: "Rebelao reciente", Content: "Cosecha de Rebelao del proyecto erp-agm",
+			Kind: memory.KindEvent, Topics: []string{"proyecto-erp-agm", "finca-rebelao"}, OccurredAt: day(2026, 5, 10)})
+		relinkTopics(t, e, recent, []string{"proyecto-erp-agm", "finca-rebelao"})
+		other := e.save(t, memory.Item{Title: "Otro tema", Content: "Cosecha de otra finca",
+			Kind: memory.KindEvent, Topics: []string{"finca-otra"}, OccurredAt: day(2026, 5, 10)})
+		relinkTopics(t, e, other, []string{"finca-otra"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+		// Sin query pero con tags: debe funcionar.
+		res, err := svc.Recall(e.ctx, Request{
+			TagsAll: []string{"proyecto-erp-agm", "finca-rebelao"},
+		})
+		if err != nil {
+			t.Fatalf("query vacía + tags_all no debería fallar: %v", err)
+		}
+		got := idsOf(res.Results)
+		if !slices.Contains(got, recent) {
+			t.Errorf("query vacía + tags debería traer #%d: results=%v", recent, got)
+		}
+		if slices.Contains(got, other) {
+			t.Errorf("query vacía + tags NO debería traer #%d (no tiene los tags): results=%v", other, got)
+		}
+	})
+
+	run("S12/S13 tags inválidas: se ignoran; tags_all todas inválidas → error", func(t *testing.T, e *env) {
+		saveTags(t, e, "finca-rebelao")
+		recent := e.save(t, memory.Item{Title: "Rebelao", Content: "Cosecha en Rebelao",
+			Kind: memory.KindFact, Topics: []string{"finca-rebelao"}})
+		relinkTopics(t, e, recent, []string{"finca-rebelao"})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+
+		// Una tag inválida mezclada con una válida: la inválida se ignora.
+		res, err := svc.Recall(e.ctx, Request{
+			Query:   "cosecha",
+			TagsAll: []string{"finca-rebelao", "tag-inexistente"},
+		})
+		if err != nil {
+			t.Fatalf("tag inválida mezclada con válida no debería fallar: %v", err)
+		}
+		got := idsOf(res.Results)
+		if !slices.Contains(got, recent) {
+			t.Errorf("tag inválida ignorada debería dejar pasar #%d: results=%v", recent, got)
+		}
+
+		// tags_any con una inválida: se ignora silenciosamente (no rompe la query).
+		res, err = svc.Recall(e.ctx, Request{
+			Query:   "cosecha",
+			TagsAny: []string{"finca-rebelao", "tag-inexistente"},
+		})
+		if err != nil {
+			t.Fatalf("tags_any con inválida no debería fallar: %v", err)
+		}
+		if !slices.Contains(idsOf(res.Results), recent) {
+			t.Errorf("tags_any con inválida debería traer #%d: results=%v", recent, idsOf(res.Results))
+		}
+
+		// tags_all con TODAS inválidas: error.
+		_, err = svc.Recall(e.ctx, Request{
+			Query:   "cosecha",
+			TagsAll: []string{"tag-inexistente-1", "tag-inexistente-2"},
+		})
+		wantErr(t, err, "tags_all: ninguna tag existe")
+	})
+
+	run("S12/S13 backward compat: llamadas sin los nuevos campos funcionan idéntico a antes", func(t *testing.T, e *env) {
+		e.save(t, memory.Item{Title: "Matrícula", Content: "La matrícula del coche es 1234-KLM",
+			Kind: memory.KindNote, Topics: []string{"coche"}})
+
+		svc := e.service(unavailableEmbedder{dims: testDims}, Options{TopicDetectThreshold: lowThreshold})
+
+		// Llamada sin filtros nuevos.
+		baseline, err := svc.Recall(e.ctx, Request{Query: "matrícula"})
+		if err != nil {
+			t.Fatalf("baseline sin filtros falló: %v", err)
+		}
+		// Llamada con los campos en su valor cero (slice vacío y string vacío).
+		zero, err := svc.Recall(e.ctx, Request{
+			Query:    "matrícula",
+			TagsAll:  nil,
+			TagsAny:  nil,
+			DateFrom: "",
+			DateTo:   "",
+		})
+		if err != nil {
+			t.Fatalf("llamada con filtros vacíos falló: %v", err)
+		}
+		if !slices.Equal(idsOf(baseline.Results), idsOf(zero.Results)) {
+			t.Errorf("con filtros vacíos el resultado debe coincidir con la baseline: baseline=%v zero=%v",
+				idsOf(baseline.Results), idsOf(zero.Results))
+		}
+	})
+}
+
+// TestRecall_FullTextOnly verifica que recall devuelve resultados cuando el
+// embedder está caído (ErrUnavailable): el camino textOnly=true (recall.go
+// línea ~285) desactiva la búsqueda semántica y deja la full-text + tags como
+// única fuente. Esto es el comportamiento que sostiene S6 (recall sin Ollama).
+//
+// RED: si el camino textOnly se rompe (p.ej. porque alguien devuelve el error
+// en lugar de degradar), este test falla. Pasa en cuanto el camino
+// errores.Is(ErrUnavailable) está correctamente cableado.
+func TestRecall_FullTextOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	tc := database.NewTestCluster(t, testDims)
+	tc.Reset(t)
+
+	emb := &embedding.FakeEmbedder{Dimensions: testDims}
+	mgr := session.NewManager(tc.Pool, testIdle)
+	res := topic.NewResolver(tc.Pool, emb, testTopicSim)
+
+	mem := memory.NewService(tc.Pool, emb, res, mgr, testDup, testTimeout)
+	tr := mgr.NewTracker("test")
+	saved, err := mem.Remember(ctx, tr, []memory.Item{{
+		Title:   "Volvo S60",
+		Content: "El Volvo S60 tiene matrícula 4860-NGL",
+		Kind:    memory.KindFact,
+		Topics:  []string{"coche-volvo-s60"},
+	}})
+	if err != nil || len(saved) != 1 {
+		t.Fatalf("Remember: %v, %d guardados", err, len(saved))
+	}
+	target := saved[0].ID
+
+	// recall con unavailableEmbedder en lugar del fake.
+	svc := NewService(tc.Pool, unavailableEmbedder{dims: testDims},
+		topic.NewResolver(tc.Pool, emb, testTopicSim),
+		Options{TopicDetectThreshold: lowThreshold})
+
+	res2, err := svc.Recall(ctx, Request{Query: "Volvo S60"})
+	if err != nil {
+		t.Fatalf("Recall sin embeddings: %v", err)
+	}
+	if !res2.TextOnly {
+		t.Errorf("TextOnly = false, quería true (modo sin embeddings)")
+	}
+	if res2.Topic != nil {
+		t.Errorf("sin embeddings no se detecta tema, Topic = %+v", res2.Topic)
+	}
+	if got := idsOf(res2.Results); !slices.Equal(got, []int64{target}) {
+		t.Errorf("Results = %v, quería [%d]", got, target)
+	}
+	if out := res2.Format(svc.MaxBytes()); !strings.HasPrefix(out, textOnlyLine+"\n") {
+		t.Errorf("la primera línea debería ser el aviso de solo texto:\n%s", out)
+	}
 }

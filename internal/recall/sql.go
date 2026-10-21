@@ -1,6 +1,9 @@
 package recall
 
-import "strconv"
+import (
+	"strconv"
+	"time"
+)
 
 // The statements in this file are the single source of truth of the recall queries:
 // `lodan bench` measures exactly these texts. Any change to them must be validated
@@ -13,24 +16,48 @@ import "strconv"
 // ones may be left out.
 const TextRankCap = 2000
 
+// TextFilter is the set of filters applied to the full-text candidate search of
+// Recall (S12). An empty Query skips the text predicate; the topic/date filters
+// are AND-combined.
+type TextFilter struct {
+	Query          string
+	IncludeHistory bool
+	// TagsAll are the topic ids a record must carry ALL of. Empty skips the filter.
+	TagsAll []int32
+	// TagsAny are the topic ids a record must carry at least ONE of. Empty skips the filter.
+	TagsAny []int32
+	// DateFrom is the inclusive lower bound on occurred_at (nil skips the filter).
+	DateFrom *time.Time
+	// DateTo is the inclusive upper bound on occurred_at (nil skips the filter).
+	DateTo *time.Time
+}
+
 // TextCandidatesSQL returns the full-text candidates statement: the ids of the
-// records that match the query, best ranked first. Non-active records are included
-// only with includeHistory.
+// records that match the query and the filters of f, best ranked first. Non-active
+// records are included only with IncludeHistory.
 //
-// Parameters: $1 is the query text and $2 the number of ids to return. The ranking
-// is computed over at most TextRankCap matches.
-func TextCandidatesSQL(includeHistory bool) string {
+// Parameters: $1 is the query text, $2 is the include_history flag, $3 is the
+// TagsAll topic ids, $4 is the TagsAny topic ids, $5 is the DateFrom, $6 is the
+// DateTo, and $7 is the number of ids to return. The ranking is computed over at
+// most TextRankCap matches.
+func TextCandidatesSQL(f TextFilter) string {
 	sql := `SELECT id FROM (
-		SELECT id, tsv FROM memories
-		WHERE tsv @@ websearch_to_tsquery('spanish', $1::text)`
-	if !includeHistory {
-		sql += ` AND status = 'active'`
-	}
-	sql += `
+		SELECT id, tsv, occurred_at FROM memories
+		WHERE ($1::text = '' OR tsv @@ websearch_to_tsquery('spanish', $1::text))
+		  AND ($2::bool OR status = 'active')
 		LIMIT ` + strconv.Itoa(TextRankCap) + `
 	) m
-	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, id DESC
-	LIMIT $2`
+	WHERE
+	  (cardinality($3::int[]) = 0 OR
+	    (SELECT count(DISTINCT mt.topic_id) FROM memory_topics mt
+	     WHERE mt.memory_id = m.id AND mt.topic_id = ANY($3::int[]) AND mt.active) = cardinality($3::int[]))
+	  AND (cardinality($4::int[]) = 0 OR EXISTS (
+	    SELECT 1 FROM memory_topics mt
+	    WHERE mt.memory_id = m.id AND mt.topic_id = ANY($4::int[]) AND mt.active))
+	  AND ($5::timestamptz IS NULL OR m.occurred_at >= $5::timestamptz)
+	  AND ($6::timestamptz IS NULL OR m.occurred_at <= $6::timestamptz)
+	ORDER BY ts_rank_cd(m.tsv, websearch_to_tsquery('spanish', $1::text)) DESC, m.id DESC
+	LIMIT $7`
 	return sql
 }
 

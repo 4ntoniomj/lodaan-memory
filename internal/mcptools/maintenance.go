@@ -57,19 +57,23 @@ func (m *Maintenance) Run(ctx context.Context, interval time.Duration) {
 
 // RunOnce executes one maintenance pass.
 func (m *Maintenance) RunOnce(ctx context.Context) {
-	if m.d.Memory != nil {
-		n, err := m.d.Memory.FillPending(ctx, pendingBatch)
-		if n > 0 {
-			m.log.Printf("mantenimiento: %d embeddings de registros completados", n)
+	if m.shouldFillEmbeddings() {
+		if m.d.Memory != nil {
+			n, err := m.d.Memory.FillPending(ctx, pendingBatch)
+			if n > 0 {
+				m.log.Printf("mantenimiento: %d embeddings de registros completados", n)
+			}
+			m.report(ctx, "embeddings pendientes de registros", err)
 		}
-		m.report(ctx, "embeddings pendientes de registros", err)
-	}
-	if m.d.Topics != nil {
-		n, err := m.d.Topics.FillPending(ctx, pendingBatch)
-		if n > 0 {
-			m.log.Printf("mantenimiento: %d embeddings de temas completados", n)
+		if m.d.Topics != nil {
+			n, err := m.d.Topics.FillPending(ctx, pendingBatch)
+			if n > 0 {
+				m.log.Printf("mantenimiento: %d embeddings de temas completados", n)
+			}
+			m.report(ctx, "embeddings pendientes de temas", err)
 		}
-		m.report(ctx, "embeddings pendientes de temas", err)
+	} else {
+		m.log.Printf("mantenimiento: modo sin embeddings (--with-embeddings=false); se omite FillPending")
 	}
 	if m.d.Sessions != nil {
 		_, err := m.d.Sessions.CloseIdle(ctx)
@@ -79,6 +83,12 @@ func (m *Maintenance) RunOnce(ctx context.Context) {
 		m.afterPass()
 	}
 }
+
+// shouldFillEmbeddings returns whether the maintenance loop should call
+// FillPending on Memory and Topics. When false, the loop runs in text-only
+// mode (full-text + tags) and skips embeddings entirely; this is the default
+// in lodan-sin-ollama (--with-embeddings is opt-in).
+func (m *Maintenance) shouldFillEmbeddings() bool { return m.d.WithEmbeddings }
 
 // RunMaintenance runs, every interval and until ctx is cancelled: filling the
 // pending embeddings of records and topics, closing idle sessions and dropping

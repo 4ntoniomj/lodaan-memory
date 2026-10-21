@@ -1,11 +1,13 @@
 package mcptools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"lodan/internal/embedding"
 	"lodan/internal/memory"
 	"lodan/internal/session"
 	"lodan/internal/topic"
@@ -145,5 +147,51 @@ func TestFormatGetMissing(t *testing.T) {
 	got := formatGet([]int64{1, 9, 9}, []memory.Full{{ID: 1, Kind: memory.KindFact, Status: memory.StatusActive, Title: "A", OccurredAt: time.Now()}})
 	if !strings.HasSuffix(got, "\n\nno encontrados: #9") {
 		t.Errorf("formatGet = %q", got)
+	}
+}
+
+// TestStatus_ReportsUnavailableAsNormal verifica que, cuando el cliente Ollama
+// apunta a un puerto cerrado (Ollama caído), la línea de status reporta
+// "Ollama: no disponible" como estado normal, no como error fatal. El binario
+// debe poder seguir sirviendo el MCP.
+//
+// RED antes de A.3: el campo WithEmbeddings no existe en Deps; este test no
+// falla por sí, pero ejercita el camino Ping-falla (que ya estaba implementado).
+// Se incluye en A.3 para dejar la regresión cubierta.
+func TestStatus_ReportsUnavailableAsNormal(t *testing.T) {
+	o, err := embedding.NewOllama(embedding.Options{
+		BaseURL: "http://127.0.0.1:1",
+		Model:   "embeddinggemma:300m",
+		Dims:    768,
+		Timeout: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewOllama con puerto cerrado: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	line := StatusLine(ctx, Deps{
+		Embedder:       o,
+		WithEmbeddings: false,
+	})
+	if !strings.Contains(line, "Ollama: no disponible") {
+		t.Errorf("StatusLine = %q, quería que contenga %q", line, "Ollama: no disponible")
+	}
+}
+
+// TestStatus_NoAplicaSinOllama verifica que, si el embedder no es *Ollama, el
+// status dice "Ollama: no aplica" sin intentar ping.
+func TestStatus_NoAplicaSinOllama(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	line := StatusLine(ctx, Deps{
+		Embedder:       &embedding.FakeEmbedder{Dimensions: 64},
+		WithEmbeddings: false,
+	})
+	if !strings.Contains(line, "Ollama: no aplica") {
+		t.Errorf("StatusLine = %q, quería que contenga %q", line, "Ollama: no aplica")
 	}
 }

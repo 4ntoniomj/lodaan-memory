@@ -19,9 +19,10 @@ const maintenanceInterval = 30 * time.Second
 // runServe implements `lodan serve`. In stdio mode nothing but the MCP protocol
 // may be written to stdout: every log goes to stderr.
 func runServe(args []string, stderr io.Writer) int {
-	fs := newFlagSet("serve", "lodan serve [--http] [--addr dirección]", stderr)
+	fs := newFlagSet("serve", "lodan serve [--http] [--addr dirección] [--with-embeddings]", stderr)
 	useHTTP := fs.Bool("http", false, "usar transporte HTTP en lugar de stdio")
 	addr := fs.String("addr", "", "dirección de escucha HTTP (vacío = la de la configuración)")
+	withEmbeddings := fs.Bool("with-embeddings", false, "activar el worker de embeddings (FillPending); por defecto lodan corre sin Ollama y solo usa full-text + tags")
 	if code, done := parseFlags(fs, args); done {
 		return code
 	}
@@ -39,6 +40,7 @@ func runServe(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lodan serve: %v\n", err)
 		return 1
 	}
+	cfg.WithEmbeddings = *withEmbeddings
 	httpAddr := cfg.HTTPAddr
 	if *addr != "" {
 		httpAddr = *addr

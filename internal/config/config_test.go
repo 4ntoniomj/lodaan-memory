@@ -14,6 +14,7 @@ func isolate(t *testing.T) string {
 		"LODAN_EMBED_DIMS", "LODAN_EMBED_KEEP_ALIVE", "LODAN_EMBED_TIMEOUT_MS", "LODAN_HTTP_ADDR",
 		"LODAN_RECALL_MAX_BYTES", "LODAN_SESSION_IDLE_MINUTES",
 		"LODAN_DUP_SIMILARITY", "LODAN_TOPIC_SIMILARITY", "LODAN_TOPIC_DETECT_SIMILARITY",
+		"LODAN_WITH_EMBEDDINGS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -172,6 +173,7 @@ func TestLoadEntornoMalFormado(t *testing.T) {
 		{"LODAN_DUP_SIMILARITY", "alta"},
 		{"LODAN_TOPIC_SIMILARITY", "0,85"},
 		{"LODAN_TOPIC_DETECT_SIMILARITY", "media"},
+		{"LODAN_WITH_EMBEDDINGS", "tal-vez"},
 	}
 	for _, tc := range casos {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,6 +188,80 @@ func TestLoadEntornoMalFormado(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWithEmbeddings cubre A.3/S5: el flag --with-embeddings vive en config y
+// se carga desde LODAN_WITH_EMBEDDINGS, config.json o el default. Por defecto
+// false (lodan-sin-ollama arranca sin Ollama).
+func TestWithEmbeddings(t *testing.T) {
+	t.Run("defecto false", func(t *testing.T) {
+		isolate(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.WithEmbeddings {
+			t.Errorf("WithEmbeddings = true, quería false (default)")
+		}
+	})
+
+	for _, v := range []string{"1", "true", "t", "yes", "on", "TRUE", "True"} {
+		t.Run("env "+v+" -> true", func(t *testing.T) {
+			isolate(t)
+			t.Setenv("LODAN_WITH_EMBEDDINGS", v)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.WithEmbeddings {
+				t.Errorf("WithEmbeddings = false, quería true (LODAN_WITH_EMBEDDINGS=%q)", v)
+			}
+		})
+	}
+
+	for _, v := range []string{"0", "false", "f", "no", "off", "FALSE"} {
+		t.Run("env "+v+" -> false", func(t *testing.T) {
+			isolate(t)
+			t.Setenv("LODAN_WITH_EMBEDDINGS", v)
+			c, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.WithEmbeddings {
+				t.Errorf("WithEmbeddings = true, quería false (LODAN_WITH_EMBEDDINGS=%q)", v)
+			}
+		})
+	}
+
+	t.Run("entorno sobrescribe JSON", func(t *testing.T) {
+		dir := isolate(t)
+		t.Setenv("LODAN_WITH_EMBEDDINGS", "true")
+		if err := os.WriteFile(dir+"/config.json", []byte(`{"with_embeddings": false}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// El entorno gana al JSON (mismo orden que las demás LODAN_*).
+		if !c.WithEmbeddings {
+			t.Errorf("WithEmbeddings = false, quería true (entorno gana al JSON)")
+		}
+	})
+
+	t.Run("JSON sin entorno: gana JSON", func(t *testing.T) {
+		dir := isolate(t)
+		if err := os.WriteFile(dir+"/config.json", []byte(`{"with_embeddings": true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.WithEmbeddings {
+			t.Errorf("WithEmbeddings = false, quería true (JSON sin entorno)")
+		}
+	})
 }
 
 func TestLoadJSONMalFormado(t *testing.T) {

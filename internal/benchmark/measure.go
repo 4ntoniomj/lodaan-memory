@@ -75,7 +75,7 @@ func newSearchSQL(dims int) searchSQL {
 	return searchSQL{
 		candidates: memory.CandidatesSQL(dims),
 		rerank:     memory.RerankSQL(dims),
-		text:       recall.TextCandidatesSQL(false),
+		text:       recall.TextCandidatesSQL(recall.TextFilter{}),
 		profile:    recall.ProfileSQL,
 		events:     recall.EventsSQL,
 		exact: fmt.Sprintf(`SELECT id FROM memories WHERE status = 'active'
@@ -158,7 +158,7 @@ func measureShared(ctx context.Context, conn *pgx.Conn, sqls searchSQL, qs query
 		}
 
 		t := time.Now()
-		if _, err := queryIDs(ctx, conn, sqls.text, qs.texts[i], textLimit); err != nil {
+		if _, err := queryIDs(ctx, conn, sqls.text, qs.texts[i], false, []int32{}, []int32{}, nil, nil, textLimit); err != nil {
 			return nil, nil, fmt.Errorf("Q3 (texto): %w", err)
 		}
 		d3 := time.Since(t)

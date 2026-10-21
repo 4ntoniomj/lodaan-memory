@@ -886,3 +886,46 @@ func containsRelation(rels []Relation, want Relation) bool {
 	}
 	return false
 }
+
+// TestRemember_WithoutOllama verifica que remember no falla cuando el
+// embedder está caído: los items se guardan con embedding=NULL y
+// embedding_model=NULL (Pending=true en Saved) para que FillPending los
+// rellene cuando vuelva el servicio. Es el comportamiento que sostiene
+// S6: el binario es útil sin Ollama.
+//
+// RED: si remember propagara el ErrUnavailable o abortara el guardado, este
+// test falla. Pasa en cuanto el camino embedding=nil se respeta.
+func TestRemember_WithoutOllama(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	tc := database.NewTestCluster(t, testDims)
+	tc.Reset(t)
+	e := newEnv(ctx, tc)
+
+	// Servicio con embedder caído.
+	down := e.serviceWith(unavailableEmbedder{dims: testDims})
+
+	saved, err := down.Remember(ctx, e.tr, []Item{
+		note("Sin Ollama A", "primera nota sin embeddings"),
+		note("Sin Ollama B", "segunda nota sin embeddings"),
+	})
+	if err != nil {
+		t.Fatalf("Remember sin Ollama falló: %v", err)
+	}
+	if len(saved) != 2 {
+		t.Fatalf("se esperaban 2 guardados, hay %d", len(saved))
+	}
+	for i, s := range saved {
+		if !s.Pending {
+			t.Errorf("guardado %d: Pending = false, quería true (sin embeddings)", i)
+		}
+		if s.ID <= 0 {
+			t.Errorf("guardado %d: ID = %d, quería > 0", i, s.ID)
+		}
+	}
+
+	// La BD tiene los registros con embedding NULL.
+	if n := e.count(t, `SELECT count(*) FROM memories WHERE embedding IS NULL AND embedding_model IS NULL`); n != 2 {
+		t.Fatalf("hay %d registros con embedding NULL, se esperaban 2", n)
+	}
+}
