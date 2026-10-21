@@ -272,14 +272,22 @@ func TestRecall(t *testing.T) {
 		if res.TextOnly {
 			t.Error("TextOnly no debería estar activo")
 		}
+		// S6 de lodan-auditoria: con el tema detectado, la ficha solo muestra los
+		// registros que coinciden con la consulta, y aquí no coincide ninguno.
+		if len(res.Profile) != 0 || len(res.Events) != 0 {
+			t.Errorf("tema detectado: Profile = %v, Events = %v; se esperaban vacíos", idsOf(res.Profile), idsOf(res.Events))
+		}
+		if find(res.Results, n1) < 0 {
+			t.Errorf("Results = %v debería contener la nota #%d", idsOf(res.Results), n1)
+		}
+
+		// Con el tema pedido, la ficha se muestra completa.
+		res = e.recall(t, svc, Request{Query: "último entrenamiento", Topics: []string{"entrenamiento"}})
 		if got, want := idsOf(res.Profile), []int64{p2, d1, p3}; !slices.Equal(got, want) {
 			t.Errorf("Profile = %v, se esperaba %v", got, want)
 		}
 		if got, want := idsOf(res.Events), []int64{e2, e3, e1}; !slices.Equal(got, want) {
 			t.Errorf("Events = %v, se esperaba %v (el más reciente primero)", got, want)
-		}
-		if find(res.Results, n1) < 0 {
-			t.Errorf("Results = %v debería contener la nota #%d", idsOf(res.Results), n1)
 		}
 
 		seen := make(map[int64]bool)
@@ -297,6 +305,9 @@ func TestRecall(t *testing.T) {
 		}
 
 		// Etiquetas y fechas de la ficha.
+		if len(res.Profile) == 0 {
+			t.Fatal("Profile vacío con el tema pedido")
+		}
 		if res.Profile[0].Kind != "preference" || !res.Profile[0].OccurredAt.Equal(*day(2026, 9, 12)) {
 			t.Errorf("Profile[0] = %+v", res.Profile[0])
 		}
@@ -304,7 +315,7 @@ func TestRecall(t *testing.T) {
 		if len(out) > svc.MaxBytes() {
 			t.Errorf("la respuesta mide %d bytes y el tope es %d", len(out), svc.MaxBytes())
 		}
-		for _, want := range []string{"Tema: entrenamiento (detectado)", "Datos estables:", "Últimos eventos:", "Resultados:"} {
+		for _, want := range []string{"Tema: entrenamiento", "Datos estables:", "Últimos eventos:"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("Format no contiene %q:\n%s", want, out)
 			}
@@ -355,26 +366,21 @@ func TestRecall(t *testing.T) {
 		if res.TextOnly != textOnly {
 			t.Errorf("TextOnly = %v, se esperaba %v", res.TextOnly, textOnly)
 		}
-		// La ficha se lee tras la fusión.
-		if got := idsOf(res.Profile); !slices.Equal(got, []int64{pref}) {
-			t.Errorf("Profile = %v, se esperaba [%d]", got, pref)
-		}
-		// La preferencia ya sale en la ficha, así que no se repite; los resultados se
-		// vuelven a cortar a Limit (3) con lo que queda.
-		if find(res.Results, pref) >= 0 {
-			t.Errorf("Results = %v repite #%d, que ya está en la ficha", idsOf(res.Results), pref)
+		// S6 de lodan-auditoria: el tema votado es un tema detectado, así que su ficha
+		// solo muestra los registros que coinciden con la consulta; la preferencia
+		// «Entrena por la tarde» no coincide con «kettlebell pesado».
+		if got := idsOf(res.Profile); len(got) != 0 {
+			t.Errorf("Profile = %v, se esperaba vacía (#%d no coincide con la consulta)", got, pref)
 		}
 		for _, id := range []int64{r1, r2} {
 			if find(res.Results, id) < 0 {
 				t.Errorf("Results = %v debería contener #%d", idsOf(res.Results), id)
 			}
 		}
-		if want := 3; !textOnly && len(res.Results) != want {
-			t.Errorf("Results = %v, se esperaban %d tras quitar lo de la ficha", idsOf(res.Results), want)
+		if len(res.Results) > 3 {
+			t.Errorf("Results = %v, se esperaban como mucho 3 (Limit)", idsOf(res.Results))
 		}
-		if !textOnly && find(res.Results, other) < 0 {
-			t.Errorf("Results = %v debería completarse con #%d", idsOf(res.Results), other)
-		}
+		_ = other
 		if out := res.Format(svc.MaxBytes()); !strings.Contains(out, "Tema: entrenamiento (detectado)") {
 			t.Errorf("Format debería mostrar el tema detectado:\n%s", out)
 		}

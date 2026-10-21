@@ -91,7 +91,7 @@ func TestMergeE2E(t *testing.T) {
 	run := func(name string, f func(t *testing.T, d Deps, cs *mcp.ClientSession)) {
 		t.Run(name, func(t *testing.T) {
 			tc.Reset(t)
-			d, srv := newStack(tc)
+			d, srv := newLegacyStack(tc)
 			f(t, d, connect(t, srv, "test-client"))
 		})
 	}

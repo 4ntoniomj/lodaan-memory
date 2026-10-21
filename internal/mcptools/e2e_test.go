@@ -137,7 +137,7 @@ func TestE2E(t *testing.T) {
 	run := func(name string, f func(t *testing.T, d Deps, srv *Server)) {
 		t.Run(name, func(t *testing.T) {
 			tc.Reset(t)
-			d, srv := newStack(tc)
+			d, srv := newLegacyStack(tc)
 			f(t, d, srv)
 		})
 	}
@@ -431,4 +431,12 @@ func TestServeHTTPShutdown(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("ServeHTTP no terminó tras cancelar el contexto")
 	}
+}
+
+// newLegacyStack is newStack without the concrete tag rule of remember, for the
+// tests of features unrelated to that rule (they save items with general tags).
+func newLegacyStack(tc *database.TestCluster) (Deps, *Server) {
+	d, _ := newStack(tc)
+	d.ConcreteTagOptional = true
+	return d, NewServer(d)
 }

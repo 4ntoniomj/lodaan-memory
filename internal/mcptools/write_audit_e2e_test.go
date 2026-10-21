@@ -180,7 +180,7 @@ func TestWriteAudit_E2E(t *testing.T) {
 		// Intento 4: parecido entre 0.75 y 0.90 con etiqueta en común -> se guarda con advertencia ¿duplicado?
 		// "Matrícula 3871LNY: empresa VDM, concepto RECOL BK."
 		// Texto con similitud ~0.80:
-		warnContent := "Matrícula 3871LNY: empresa VDM, concepto RECOL BK de la semana pasada."
+		warnContent := "Matrícula 3871LNY: empresa VDM, concepto RECOL BK, semana 42." // similarity 0.825 (integration fix: the previous text measured 0.712)
 		outWarn, _ := call(t, cs, "remember", map[string]any{
 			"items": []any{
 				map[string]any{

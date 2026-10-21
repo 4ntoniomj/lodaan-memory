@@ -93,7 +93,7 @@ func TestVerdictE2E(t *testing.T) {
 	run := func(name string, f func(t *testing.T, d Deps, cs *mcp.ClientSession, a, b int64)) {
 		t.Run(name, func(t *testing.T) {
 			tc.Reset(t)
-			d, srv := newStack(tc)
+			d, srv := newLegacyStack(tc)
 			cs := connect(t, srv, "test-client")
 			a := idInt(t, saveOne(t, cs, tagItem("Registro A", "contenido del registro a", "uno")))
 			b := idInt(t, saveOne(t, cs, tagItem("Registro B", "contenido del registro b", "dos")))
@@ -303,7 +303,7 @@ func TestVerdictE2E(t *testing.T) {
 
 	run("S14 status counts low-confidence verdicts, contradice and resolves with sustituye", func(t *testing.T, d Deps, cs *mcp.ClientSession, a, b int64) {
 		c := idInt(t, saveOne(t, cs, tagItem("Registro C", "contenido del registro c", "tres")))
-		e := idInt(t, saveOne(t, cs, tagItem("Registro D", "contenido del registro d", "cuatro")))
+		e := idInt(t, saveOne(t, cs, forced(tagItem("Registro D", "contenido del registro d", "cuatro"))))
 
 		verdictOK(t, cs, a, b, "compatible", 0.5)
 		wantContains(t, mustOK(t, cs, "status", map[string]any{}),

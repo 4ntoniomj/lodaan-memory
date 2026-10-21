@@ -39,7 +39,7 @@ func (c *countingEmbedder) EmbedDocuments(ctx context.Context, docs []embedding.
 	return c.FakeEmbedder.EmbedDocuments(ctx, docs)
 }
 
-// newStackWith is newStack with a caller-provided embedder.
+// newStackWith is newLegacyStack with a caller-provided embedder.
 func newStackWith(tc *database.TestCluster, emb embedding.Embedder) (Deps, *Server) {
 	cfg := tc.Cfg
 	sessions := session.NewManager(tc.Pool, time.Duration(cfg.SessionIdleMinutes)*time.Minute)
@@ -54,6 +54,7 @@ func newStackWith(tc *database.TestCluster, emb embedding.Embedder) (Deps, *Serv
 		Cfg:      cfg,
 		Version:  "test",
 	}
+	d.ConcreteTagOptional = true
 	return d, NewServer(d)
 }
 
@@ -162,7 +163,7 @@ func TestBatches(t *testing.T) {
 	run := func(name string, f func(t *testing.T, cs *mcp.ClientSession)) {
 		t.Run(name, func(t *testing.T) {
 			tc.Reset(t)
-			_, srv := newStack(tc)
+			_, srv := newLegacyStack(tc)
 			f(t, connect(t, srv, "test-client"))
 		})
 	}
@@ -392,10 +393,10 @@ func TestBatches(t *testing.T) {
 		run(fmt.Sprintf("S2 recall: tope por bloque con %d consultas", n), func(t *testing.T, cs *mcp.ClientSession) {
 			var items []map[string]any
 			for i := 0; i < 20; i++ {
-				items = append(items, item(
+				items = append(items, forced(item(
 					fmt.Sprintf("Registro alfa número %d con un título bastante largo para ocupar espacio", i),
 					fmt.Sprintf("alfa registro %d: ", i)+strings.Repeat("contenido extenso de relleno alfa ", 8),
-					"event", "alfa"))
+					"event", "alfa")))
 			}
 			remember(t, cs, items...)
 
@@ -455,7 +456,7 @@ func TestBatches(t *testing.T) {
 		mk := func(n int) []any {
 			items := make([]any, n)
 			for i := range items {
-				items[i] = item(fmt.Sprintf("Nota %d", i), fmt.Sprintf("contenido único de la nota w%dx", i), "note", "lote")
+				items[i] = forced(item(fmt.Sprintf("Nota %d", i), fmt.Sprintf("contenido único de la nota w%dx", i), "note", "lote"))
 			}
 			return items
 		}
@@ -788,7 +789,7 @@ func TestBatches(t *testing.T) {
 			return strings.Join(w, " ") + " " + extra
 		}
 		a := saveOne(t, cs, item("Lista de términos", words(40, "uno"), "note", "glosario"))
-		out := remember(t, cs, item("Lista de términos", words(40, "dos"), "note", "glosario"))
+		out := remember(t, cs, forced(item("Lista de términos", words(40, "dos"), "note", "glosario")))
 		if strings.Contains(out, "parecidos:") {
 			t.Errorf("la salida ya no incluye parecidos:\n%s", out)
 		}
@@ -846,4 +847,12 @@ func TestBatches(t *testing.T) {
 			t.Errorf("no debe existir relación con #9999:\n%s", got)
 		}
 	})
+}
+
+// forced marks a remember item with force: true, for test data that is
+// deliberately near-identical to other items (the near-duplicate rule would
+// reject it otherwise).
+func forced(it map[string]any) map[string]any {
+	it["force"] = true
+	return it
 }
