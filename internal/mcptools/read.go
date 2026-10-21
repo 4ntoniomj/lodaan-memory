@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -15,6 +16,7 @@ import (
 type recallInput struct {
 	Query          string   `json:"query,omitempty" jsonschema:"Pregunta o tema en lenguaje natural (puede ser vacía si hay filtros)"`
 	Queries        []string `json:"queries,omitempty" jsonschema:"Varias preguntas en una sola llamada (máx. 200 en total); cada una se responde en su bloque"`
+	Mode           string   `json:"mode,omitempty" jsonschema:"rank (por defecto): por relevancia; list: por fecha, lo más reciente primero"`
 	Topics         []string `json:"topics,omitempty" jsonschema:"Temas conocidos a priorizar (opcional; si no, se detectan)"`
 	Limit          int      `json:"limit,omitempty" jsonschema:"Resultados por pregunta (por defecto 8, máx. 20)"`
 	IncludeHistory bool     `json:"include_history,omitempty" jsonschema:"Incluir registros sustituidos e invalidados"`
@@ -25,6 +27,24 @@ type recallInput struct {
 }
 
 func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in recallInput) (*mcp.CallToolResult, any, error) {
+	mode := strings.TrimSpace(in.Mode)
+	if mode != "" && mode != "rank" && mode != "list" {
+		return errorResult(fmt.Errorf("mode no válido: usa rank o list")), nil, nil
+	}
+	hasFilters := len(in.TagsAll) > 0 || len(in.TagsAny) > 0 ||
+		strings.TrimSpace(in.DateFrom) != "" || strings.TrimSpace(in.DateTo) != ""
+	if mode == "list" && strings.TrimSpace(in.Query) == "" && len(in.Queries) == 0 && !hasFilters {
+		return errorResult(fmt.Errorf("mode list necesita query o algún filtro (tags_all, tags_any, date_from, date_to)")), nil, nil
+	}
+	limit := in.Limit
+	if mode == "list" {
+		if limit <= 0 {
+			limit = 20
+		} else if limit > 50 {
+			limit = 50
+		}
+	}
+
 	queries, err := recallQueries(in)
 	if err != nil {
 		return errorResult(err), nil, nil
@@ -33,8 +53,9 @@ func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in 
 		return errorResult(err), nil, nil
 	}
 	base := recall.Request{
+		Mode:           mode,
 		Topics:         in.Topics,
-		Limit:          in.Limit,
+		Limit:          limit,
 		IncludeHistory: in.IncludeHistory,
 		TagsAll:        in.TagsAll,
 		TagsAny:        in.TagsAny,
@@ -42,7 +63,7 @@ func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in 
 		DateTo:         in.DateTo,
 	}
 	if len(queries) > 1 {
-		return textResult(s.recallBatch(ctx, queries, base)), nil, nil
+		return textResult(s.runRecallBatch(ctx, queries, base)), nil, nil
 	}
 	if len(queries) == 1 {
 		base.Query = queries[0]
@@ -54,6 +75,54 @@ func (s *Server) handleRecall(ctx context.Context, req *mcp.CallToolRequest, in 
 		return errorResult(err), nil, nil
 	}
 	return textResult(res.Format(s.d.Cfg.RecallMaxBytes)), nil, nil
+}
+
+const textOnlyNotice = "(solo búsqueda por texto: el servicio de embeddings no está disponible)"
+
+func (s *Server) runRecallBatch(ctx context.Context, queries []string, base recall.Request) string {
+	blockCap := blockBytes(s.d.Cfg.RecallMaxBytes, len(queries))
+	blocks := make([]string, len(queries))
+	var (
+		anyTextOnly bool
+		mu          sync.Mutex
+	)
+	for start := 0; start < len(queries); start += recallChunk {
+		chunk := queries[start:min(start+recallChunk, len(queries))]
+		s.d.Recall.Prime(ctx, chunk)
+
+		sem := make(chan struct{}, recallWorkers)
+		var wg sync.WaitGroup
+		for i, q := range chunk {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int, q string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				req := base
+				req.Query = q
+				var body string
+				if res, err := s.d.Recall.Recall(ctx, req); err != nil {
+					body = "error: " + err.Error()
+				} else {
+					if res.TextOnly {
+						mu.Lock()
+						anyTextOnly = true
+						mu.Unlock()
+					}
+					body = res.FormatBody(blockCap)
+					body = strings.TrimPrefix(body, textOnlyNotice+"\n")
+					body = strings.TrimPrefix(body, textOnlyNotice)
+				}
+				blocks[start+i] = "## " + q + "\n" + body
+			}(i, q)
+		}
+		wg.Wait()
+	}
+	result := strings.Join(blocks, "\n\n") + "\n" + recall.GetHint
+	if anyTextOnly {
+		result = textOnlyNotice + "\n" + result
+	}
+	return result
 }
 
 // getInput is the input of the get tool.

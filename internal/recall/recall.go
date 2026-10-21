@@ -118,6 +118,9 @@ type Request struct {
 	// Query is the free-text question; 1 to 1000 runes once trimmed. May be
 	// empty when TagsAll, TagsAny, DateFrom or DateTo are set.
 	Query string
+	// Mode is the search mode: "" or "rank" for relevance ranking; "list" for
+	// chronological order (occurred_at DESC, id DESC).
+	Mode string
 	// Topics are the topics the caller wants; the first one that exists is used.
 	Topics []string
 	// Limit is the number of results: 0 means the default, and it is capped at MaxLimit.
@@ -160,6 +163,8 @@ type Item struct {
 type Result struct {
 	// Query is the trimmed query.
 	Query string
+	// Notice is an optional advisory line shown at the top of the block.
+	Notice string
 	// Topic is the requested or detected topic; nil if there is none.
 	Topic *topic.Topic
 	// TopicDetected is true when Topic was inferred from the query (by similarity or by vote).
@@ -218,6 +223,16 @@ func (s *Service) clampLimit(limit int) int {
 	return min(max(limit, 1), s.opts.MaxLimit)
 }
 
+func (s *Service) clampLimitForMode(limit int, mode string) int {
+	if mode == "list" {
+		if limit <= 0 {
+			return 20
+		}
+		return min(limit, 50)
+	}
+	return s.clampLimit(limit)
+}
+
 // Recall runs the hybrid search.
 //
 // The embedding of the query (slow on CPU) runs in parallel with the full-text
@@ -240,7 +255,7 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	if n := utf8.RuneCountInString(query); n > maxQueryRunes {
 		return Result{}, fmt.Errorf("la consulta tiene %d caracteres y el máximo es %d", n, maxQueryRunes)
 	}
-	limit := s.clampLimit(req.Limit)
+	limit := s.clampLimitForMode(req.Limit, req.Mode)
 
 	dateFrom, dateTo, err := parseRangeBoundaries(req.DateFrom, req.DateTo)
 	if err != nil {
@@ -266,13 +281,13 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		textOnly bool
 		semantic []memory.Neighbor
 		textIDs  []int64
+		notice   string
 		profile  []Item
 		events   []Item
 	)
-	// Con filtros: la ficha del tema (pedida o detectada) se omite. Los filtros
-	// ya acotan la búsqueda, y la ficha ignoraría los filtros, mostrando más de
-	// lo que el usuario pidió. Si el usuario quiere la ficha, quita los filtros.
-	skipTopic := hasFilters
+	// Con filtros o en modo list: la ficha del tema (pedida o detectada) se omite.
+	isList := req.Mode == "list"
+	skipTopic := hasFilters || isList
 	g, gctx := newGroup(ctx)
 
 	// Recarga de la caché de temas: solo hace falta si hay que detectar el tema.
@@ -287,7 +302,7 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	}
 
 	// (c) Ficha del tema pedido. Se omite si hay filtros (skipTopic): el
-	// usuario ya delimitó con tags_all/tags_any/date_from/date_to.
+	// usuario ya delimitó con tags_all/tags_any/date_from/date_to o pidió modo lista.
 	if tp != nil && !skipTopic {
 		id := tp.ID
 		g.Go(func() error {
@@ -302,8 +317,9 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 
 	// (b) Candidatos de texto.
 	g.Go(func() error {
-		ids, err := s.textSearch(gctx, TextFilter{
+		ids, n, err := s.textSearch(gctx, TextFilter{
 			Query:          query,
+			Mode:           req.Mode,
 			IncludeHistory: req.IncludeHistory,
 			TagsAll:        tagsAllIDs,
 			TagsAny:        tagsAnyIDs,
@@ -314,12 +330,13 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 			return err
 		}
 		textIDs = ids
+		notice = n
 		return nil
 	})
 
 	// (a) Embedding, detección del tema y candidatos semánticos.
 	if skipTopic {
-		// La salida vive solo del full-text + los filtros (S12). No hace falta
+		// La salida vive solo del full-text + los filtros (S12) o lista. No hace falta
 		// ni embedding ni vecinos semánticos ni detección de tema.
 		textOnly = true
 	} else {
@@ -369,8 +386,26 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
+	if isList {
+		res := Result{
+			Query:    query,
+			Notice:   notice,
+			TextOnly: textOnly,
+		}
+		if len(textIDs) > limit {
+			textIDs = textIDs[:limit]
+		}
+		var err error
+		res.Results, err = s.details(ctx, textIDs)
+		if err != nil {
+			return Result{}, err
+		}
+		return res, nil
+	}
+
 	res := Result{
 		Query:    query,
+		Notice:   notice,
 		Topic:    tp,
 		TopicVia: via,
 		Profile:  profile,
@@ -386,14 +421,32 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 	for _, it := range events {
 		shown[it.ID] = true
 	}
-	ids, err := s.fuse(ctx, tp, semantic, textIDs, shown)
-	if err != nil {
-		return Result{}, err
+
+	var ids []int64
+	if notice != "" {
+		ids = textIDs
+	} else {
+		var err error
+		ids, err = s.fuse(ctx, tp, semantic, textIDs, shown)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
+	// Tema detectado: mostrar solo registros de la ficha que coincidan con la consulta.
+	if tp != nil && via != TopicViaRequested && query != "" {
+		var err error
+		if res.Profile, err = s.filterTopicItemsMatching(ctx, res.Profile, query); err != nil {
+			return Result{}, err
+		}
+		if res.Events, err = s.filterTopicItemsMatching(ctx, res.Events, query); err != nil {
+			return Result{}, err
+		}
 	}
 
 	// Sin tema todavía: votación entre los mejores resultados. La ficha se lee ahora,
 	// tras la fusión, así que se quitan de los resultados los registros que ya muestra.
-	if tp == nil && !skipTopic {
+	if tp == nil && !skipTopic && notice == "" {
 		voted, ok, err := s.voteTopic(ctx, ids)
 		if err != nil {
 			return Result{}, err
@@ -402,6 +455,16 @@ func (s *Service) Recall(ctx context.Context, req Request) (Result, error) {
 			p, e, err := s.topicCard(ctx, voted.ID)
 			if err != nil {
 				return Result{}, err
+			}
+			if query != "" {
+				p, err = s.filterTopicItemsMatching(ctx, p, query)
+				if err != nil {
+					return Result{}, err
+				}
+				e, err = s.filterTopicItemsMatching(ctx, e, query)
+				if err != nil {
+					return Result{}, err
+				}
 			}
 			res.Topic, res.TopicVia, res.Profile, res.Events = &voted, TopicViaVote, p, e
 			for _, it := range p {
@@ -534,9 +597,7 @@ func (s *Service) embedQuery(ctx context.Context, query string) ([]float32, erro
 	return v, nil
 }
 
-// textSearch returns the ids of the records matching the filter, best first.
-// Non-active records are included only when IncludeHistory is set.
-func (s *Service) textSearch(ctx context.Context, f TextFilter) ([]int64, error) {
+func (s *Service) runTextQuery(ctx context.Context, sqlStr string, q string, f TextFilter) ([]int64, error) {
 	tagsAll := f.TagsAll
 	if tagsAll == nil {
 		tagsAll = []int32{}
@@ -545,8 +606,8 @@ func (s *Service) textSearch(ctx context.Context, f TextFilter) ([]int64, error)
 	if tagsAny == nil {
 		tagsAny = []int32{}
 	}
-	rows, err := s.pool.Query(ctx, TextCandidatesSQL(f),
-		f.Query, f.IncludeHistory, tagsAll, tagsAny, f.DateFrom, f.DateTo, textCandidates)
+	rows, err := s.pool.Query(ctx, sqlStr,
+		q, f.IncludeHistory, tagsAll, tagsAny, f.DateFrom, f.DateTo, textCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("falló la búsqueda por texto: %w", err)
 	}
@@ -563,6 +624,77 @@ func (s *Service) textSearch(ctx context.Context, f TextFilter) ([]int64, error)
 		return nil, fmt.Errorf("falló la búsqueda por texto: %w", err)
 	}
 	return ids, nil
+}
+
+// textSearch returns the ids of the records matching the filter, best first.
+// Non-active records are included only when IncludeHistory is set.
+// It also returns an advisory notice if an OR or fuzzy fallback was used.
+func (s *Service) textSearch(ctx context.Context, f TextFilter) ([]int64, string, error) {
+	ids, err := s.runTextQuery(ctx, TextCandidatesSQL(f), f.Query, f)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(ids) > 0 || f.Query == "" {
+		return ids, "", nil
+	}
+
+	// S2 Fallback: OR search
+	orQ := orQuery(f.Query)
+	if orQ != "" && orQ != strings.ToLower(f.Query) {
+		orIDs, err := s.runTextQuery(ctx, TextCandidatesSQL(f), orQ, f)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(orIDs) > 0 {
+			return orIDs, "(sin coincidencia con todas las palabras: resultados con alguna de ellas)", nil
+		}
+	}
+
+	// S3 Fallback: Trigram fuzzy search
+	fuzzyIDs, err := s.runTextQuery(ctx, FuzzyCandidatesSQL(f), f.Query, f)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(fuzzyIDs) > 0 {
+		return fuzzyIDs, "(sin coincidencia exacta: resultados parecidos)", nil
+	}
+
+	return nil, "", nil
+}
+
+// filterTopicItemsMatching keeps only the topic items whose tsv matches the query.
+func (s *Service) filterTopicItemsMatching(ctx context.Context, items []Item, query string) ([]Item, error) {
+	if len(items) == 0 || strings.TrimSpace(query) == "" {
+		return items, nil
+	}
+	ids := make([]int64, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id FROM memories
+		WHERE id = ANY($1) AND tsv @@ websearch_to_tsquery('lodan_es', $2::text)`, ids, query)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo filtrar la ficha del tema por consulta: %w", err)
+	}
+	defer rows.Close()
+	matching := make(map[int64]bool)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		matching[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []Item
+	for _, it := range items {
+		if matching[it.ID] {
+			out = append(out, it)
+		}
+	}
+	return out, nil
 }
 
 // parseRangeBoundaries parses DateFrom and DateTo from a Request. An AAAA-MM-DD
