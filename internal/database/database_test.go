@@ -198,8 +198,8 @@ func TestMigrate(t *testing.T) {
 	if err := tc.Pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 4 {
-		t.Errorf("schema_migrations tiene %d filas, se esperaban 4", applied)
+	if applied != 6 {
+		t.Errorf("schema_migrations tiene %d filas, se esperaban 6", applied)
 	}
 
 	// 0003: memories.sync_id es uuid NOT NULL con índice único.
