@@ -4,3 +4,7 @@
 *.test
 coverage.out
 .claude/settings.local.json
+
+# Accidental Windows build outputs (go build -o /dev/null on Windows)
+/dev/null
+/tmp/
