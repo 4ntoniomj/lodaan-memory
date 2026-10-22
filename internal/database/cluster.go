@@ -121,7 +121,7 @@ func (c *Cluster) Init(ctx context.Context) error {
 		if !c.configured() {
 			return c.configure()
 		}
-		return nil
+		return c.upgradeConfig()
 	}
 
 	password, err := randomPassword()
@@ -190,6 +190,44 @@ func (c *Cluster) configured() bool {
 	return err == nil && strings.Contains(string(data), confMarker)
 }
 
+// maxConnections is the PostgreSQL connection limit. Every MCP client runs its own
+// `lodan serve` with a pool of up to maxConns connections, so the limit must leave room for
+// many clients working at the same time plus the service, lodan-http, hooks and psql.
+const maxConnections = 100
+
+// legacyMaxConnections is the line older lodan versions wrote; it allowed only about five
+// simultaneous clients ("too many clients already", SQLSTATE 53300).
+const legacyMaxConnections = "\nmax_connections = 20\n"
+
+// upgradeConfig raises the connection limit of a cluster configured by an older lodan. Only
+// lodan's own old default inside its block is replaced, so a value set by hand is kept. The
+// new limit takes effect the next time PostgreSQL starts.
+func (c *Cluster) upgradeConfig() error {
+	confPath := filepath.Join(c.cfg.PGDataDir(), "postgresql.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return fmt.Errorf("no se pudo leer %s: %w", confPath, err)
+	}
+	conf := string(data)
+	idx := strings.LastIndex(conf, confMarker)
+	if idx < 0 || !strings.Contains(conf[idx:], legacyMaxConnections) {
+		return nil
+	}
+	block := strings.Replace(conf[idx:], legacyMaxConnections,
+		"\nmax_connections = "+strconv.Itoa(maxConnections)+"\n", 1)
+	// Write to a temporary file and rename it, so a crash never leaves postgresql.conf
+	// truncated.
+	tmp := confPath + ".lodan-tmp"
+	if err := os.WriteFile(tmp, []byte(conf[:idx]+block), 0o600); err != nil {
+		return fmt.Errorf("no se pudo escribir %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, confPath); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("no se pudo reemplazar %s: %w", confPath, err)
+	}
+	return nil
+}
+
 // configure appends lodan's settings to postgresql.conf and rewrites pg_hba.conf so that only
 // the lodan user can connect, over TCP on 127.0.0.1, with scram-sha-256.
 func (c *Cluster) configure() error {
@@ -204,7 +242,7 @@ func (c *Cluster) configure() error {
 		"shared_buffers = 256MB",
 		"work_mem = 16MB",
 		"maintenance_work_mem = 512MB",
-		"max_connections = 20",
+		"max_connections = " + strconv.Itoa(maxConnections),
 		"",
 	}, "\n")
 

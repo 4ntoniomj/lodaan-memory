@@ -154,6 +154,8 @@ Se puede cambiar con la variable `LODAN_DATA_DIR`.
 
 Tras instalar y reiniciar tus clientes de IA, no hay que arrancar nada a mano: el servicio `lodan` mantiene PostgreSQL y las tareas de fondo, y cada cliente MCP lanza `lodan serve` por su cuenta (transporte stdio, que es el valor por defecto). Si instalaste con `--skip-service`, `lodan serve` arranca PostgreSQL bajo demanda.
 
+**Muchas IAs a la vez.** Cada cliente MCP lanza su propio `lodan serve`, con un pool de hasta 4 conexiones. El PostgreSQL de lodan admite 100 conexiones (`max_connections = 100`), y un `lodan serve` inactivo devuelve sus conexiones a los 30 segundos, así que caben al menos 25 IAs usando la memoria a pleno a la vez (100 / 4), y en la práctica unas 50, porque cada una suele usar solo 1 o 2 conexiones (prueba del 2026-10-22: 30 de 30 procesos simultáneos sin error; con 60, 51). Los clústeres creados por versiones anteriores (que tenían `max_connections = 20` y se saturaban con unos 5 clientes, con el error `too many clients already`) se actualizan solos al arrancar lodan; el límite nuevo se aplica en el siguiente arranque de PostgreSQL (`lodan service restart`, o `lodan db stop` y `lodan db start` sin servicio). Si has puesto otro valor a mano en el bloque `# lodan` de `postgresql.conf`, lodan lo respeta.
+
 Para comprobar el estado (en Windows, `.\lodan` en lugar de `./lodan`):
 
 ```bash

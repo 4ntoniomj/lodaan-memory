@@ -3,13 +3,22 @@ package database
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// maxConns is the pool size. The cluster allows 20 connections and several lodan
-// processes (one per MCP client) may share it.
+// maxConns is the pool size. The cluster allows maxConnections connections and several lodan
+// processes (one per MCP client) share it.
 const maxConns = 4
+
+// An idle process (an MCP client that is not using memory right now) gives its connections
+// back after idleTimeout, checked every healthCheckPeriod, so idle clients do not take slots
+// from the active ones.
+const (
+	idleTimeout       = 30 * time.Second
+	healthCheckPeriod = 15 * time.Second
+)
 
 // Open creates a pgx pool for dsn and checks the connection with a ping.
 //
@@ -21,6 +30,9 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("DSN de PostgreSQL inválido: %w", err)
 	}
 	cfg.MaxConns = maxConns
+	cfg.MinConns = 0
+	cfg.MaxConnIdleTime = idleTimeout
+	cfg.HealthCheckPeriod = healthCheckPeriod
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
