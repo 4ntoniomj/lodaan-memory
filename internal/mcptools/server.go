@@ -91,32 +91,33 @@ const (
 
 // register adds the six tools to srv. The input schemas are inferred from the
 // input structs (the jsonschema tag is the property description) and the enums,
-// which the tag cannot express, are added by hand.
+// which the tag cannot express, are added by hand. They are registered through
+// addTool, so the arguments are normalized before the handler (tolerant.go).
 func (s *Server) register(srv *mcp.Server) {
 	remember := schemaFor[rememberInput]()
 	setEnum(remember.Properties["items"].Items, "kind", kindNames...)
-	mcp.AddTool(srv, &mcp.Tool{Name: "remember", Description: descRemember, InputSchema: remember}, s.handleRemember)
+	addTool(srv, &mcp.Tool{Name: "remember", Description: descRemember, InputSchema: remember}, s.handleRemember)
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "recall", Description: descRecall, InputSchema: schemaFor[recallInput](), Annotations: readOnly()}, s.handleRecall)
-	mcp.AddTool(srv, &mcp.Tool{Name: "get", Description: descGet, InputSchema: schemaFor[getInput](), Annotations: readOnly()}, s.handleGet)
+	addTool(srv, &mcp.Tool{Name: "recall", Description: descRecall, InputSchema: schemaFor[recallInput](), Annotations: readOnly()}, s.handleRecall)
+	addTool(srv, &mcp.Tool{Name: "get", Description: descGet, InputSchema: schemaFor[getInput](), Annotations: readOnly()}, s.handleGet)
 
 	revise := schemaFor[reviseInput]()
 	setEnum(revise, "action", reviseActions...)
 	setEnum(revise, "relation", relationKinds...)
 	setEnum(revise.Properties["ops"].Items, "action", reviseActions...)
 	setEnum(revise.Properties["ops"].Items, "relation", relationKinds...)
-	mcp.AddTool(srv, &mcp.Tool{Name: "revise", Description: descRevise, InputSchema: revise}, s.handleRevise)
+	addTool(srv, &mcp.Tool{Name: "revise", Description: descRevise, InputSchema: revise}, s.handleRevise)
 
 	sess := schemaFor[sessionInput]()
 	setEnum(sess, "action", sessionActions...)
 	setEnum(sess.Properties["ops"].Items, "action", sessionActions...)
-	mcp.AddTool(srv, &mcp.Tool{Name: "session", Description: descSession, InputSchema: sess}, s.handleSession)
+	addTool(srv, &mcp.Tool{Name: "session", Description: descSession, InputSchema: sess}, s.handleSession)
 
-	mcp.AddTool(srv, &mcp.Tool{Name: "status", Description: descStatus, InputSchema: schemaFor[statusInput](), Annotations: readOnly()}, s.handleStatus)
+	addTool(srv, &mcp.Tool{Name: "status", Description: descStatus, InputSchema: schemaFor[statusInput](), Annotations: readOnly()}, s.handleStatus)
 
 	tagsIdx := schemaFor[tagsIndexInput]()
 	setEnum(tagsIdx, "scope", "trabajo", "personal")
-	mcp.AddTool(srv, &mcp.Tool{Name: "tags_index", Description: descTagsIndex, InputSchema: tagsIdx, Annotations: readOnly()}, s.handleTagsIndex)
+	addTool(srv, &mcp.Tool{Name: "tags_index", Description: descTagsIndex, InputSchema: tagsIdx, Annotations: readOnly()}, s.handleTagsIndex)
 }
 
 // readOnly marks a tool that only reads, so clients may run several calls of

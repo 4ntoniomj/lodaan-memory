@@ -50,6 +50,10 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		if err != nil {
 			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
 		}
+		kind, err := memory.ParseKind(it.Kind)
+		if err != nil {
+			return errorResult(fmt.Errorf("ítem %d: %w", i+1, err)), nil, nil
+		}
 		relate := make([]memory.RelateTo, len(it.Relate))
 		for j, r := range it.Relate {
 			relate[j] = memory.RelateTo{ID: r.ID, Kind: r.Relation}
@@ -60,7 +64,7 @@ func (s *Server) handleRemember(ctx context.Context, req *mcp.CallToolRequest, i
 		items[i] = memory.Item{
 			Title:      repTitle,
 			Content:    repContent,
-			Kind:       memory.Kind(it.Kind),
+			Kind:       kind,
 			Tags:       it.Tags,
 			Topics:     it.Topics,
 			Key:        it.Key,
